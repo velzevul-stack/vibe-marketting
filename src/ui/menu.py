@@ -73,9 +73,10 @@ def _render_main_menu() -> str:
     console.print("[5] Пригласить в канал")
     console.print("[6] Статистика базы")
     console.print("[7] Назначить прокси аккаунтам")
+    console.print("[8] Просмотр найденных групп")
     console.print("[0] Выход")
     console.print()
-    return Prompt.ask("Выберите действие", choices=["0", "1", "2", "3", "4", "5", "6", "7"], default="0")
+    return Prompt.ask("Выберите действие", choices=["0", "1", "2", "3", "4", "5", "6", "7", "8"], default="0")
 
 
 async def _run_search() -> None:
@@ -332,6 +333,39 @@ async def _run_stats() -> None:
     console.print(table)
 
 
+def _run_view_groups() -> None:
+    """Просмотр найденных групп из found_groups.json."""
+    found_path = Path("output") / "found_groups.json"
+    if not found_path.exists():
+        console.print("[red]Нет found_groups.json. Сначала выполните поиск групп (п.1).[/]")
+        return
+    try:
+        groups = json.loads(found_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        console.print(f"[red]Ошибка чтения: {e}[/]")
+        return
+    if not isinstance(groups, list) or not groups:
+        console.print("[yellow]Список групп пуст.[/]")
+        return
+    limit = int(Prompt.ask("Сколько показать (0 = все)", default="30"))
+    if limit <= 0:
+        limit = len(groups)
+    show = groups[:limit]
+    table = Table(title=f"Найденные группы (показано {len(show)} из {len(groups)})")
+    table.add_column("#", style="dim", width=4)
+    table.add_column("Источник", style="cyan", width=12)
+    table.add_column("Ссылка", style="green")
+    table.add_column("Название", style="white")
+    for i, g in enumerate(show, 1):
+        link = g.get("link", "") or g.get("id", "")
+        title = (g.get("title") or "")[:40]
+        if len((g.get("title") or "")) > 40:
+            title += "..."
+        table.add_row(str(i), g.get("source", "?"), link, title)
+    console.print(table)
+    console.print(f"[dim]Всего групп: {len(groups)}. Файл: {found_path}[/]")
+
+
 def run_menu() -> None:
     """Запуск главного меню."""
     while True:
@@ -353,6 +387,8 @@ def run_menu() -> None:
                 asyncio.run(_run_stats())
             elif choice == "7":
                 _run_assign_proxies()
+            elif choice == "8":
+                _run_view_groups()
         except KeyboardInterrupt:
             console.print("\n[yellow]Прервано.[/]")
         except Exception as e:
