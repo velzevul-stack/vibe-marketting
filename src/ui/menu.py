@@ -102,6 +102,10 @@ async def _run_search() -> None:
     out_path.parent.mkdir(exist_ok=True)
     out_path.write_text(json.dumps(groups, ensure_ascii=False, indent=2), encoding="utf-8")
     console.print(f"[green]Найдено групп: {len(groups)}[/]")
+    from collections import Counter
+    by_source = Counter(g.get("source", "?") for g in groups)
+    for src, cnt in by_source.most_common():
+        console.print(f"  [dim]{src}: {cnt}[/]")
     console.print(f"[dim]Сохранено в {out_path}[/]")
 
 
