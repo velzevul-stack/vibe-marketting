@@ -1,0 +1,21 @@
+{
+  "_comment": "Скопируйте в settings.json и заполните. Строки с _comment игнорируются.",
+
+  "telegram_index_api_key": "",
+
+  "proxies": {
+    "source": "files",
+    "files": ["proxies.txt"],
+    "list": []
+  },
+
+  "delays": {
+    "join_min": 30,
+    "join_max": 120,
+    "contact_min": 60,
+    "contact_max": 180,
+    "invite_min": 90,
+    "invite_max": 240
+  }
+}
+

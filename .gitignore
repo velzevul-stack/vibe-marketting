@@ -1,0 +1,9 @@
+sessions/
+output/*.db
+output/*.json
+config/accounts.json
+config/settings.json
+config/proxies.txt
+config/groups.txt
+__pycache__/
+*.pyc

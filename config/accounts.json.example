@@ -1,0 +1,20 @@
+[
+  {
+    "_comment": "Скопируйте в accounts.json. Получите api_id и api_hash на https://my.telegram.org",
+    "_template": true
+  },
+  {
+    "session_name": "account1",
+    "api_id": 12345678,
+    "api_hash": "abcdef1234567890abcdef1234567890",
+    "phone": "+375291234567",
+    "proxy": "socks5://user:password@proxy.example.com:1080"
+  },
+  {
+    "session_name": "account2",
+    "api_id": 12345678,
+    "api_hash": "abcdef1234567890abcdef1234567890",
+    "phone": "+375299876543",
+    "proxy": "socks5://user:password@proxy2.example.com:1080"
+  }
+]
