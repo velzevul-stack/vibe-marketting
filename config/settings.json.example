@@ -19,7 +19,9 @@
     "contact_min": 60,
     "contact_max": 180,
     "invite_min": 90,
-    "invite_max": 240
+    "invite_max": 240,
+    "search_min": 2,
+    "search_max": 6
   }
 }
 

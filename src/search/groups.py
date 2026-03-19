@@ -1,5 +1,6 @@
 """Поиск групп вейп-тематики."""
 import asyncio
+import random
 import re
 from pathlib import Path
 from urllib.parse import unquote
@@ -319,8 +320,12 @@ async def search_groups(
     proxy_pool: ProxyPool | None = None,
     use_ddgs: bool | None = None,
     use_tg_catalog: bool | None = None,
+    on_progress: "callable[[str, str, int, int, int, str], None] | None" = None,
 ) -> list[dict]:
-    """Поиск групп: RapidAPI + DuckDuckGo + TG Catalog (tg-cat.com) + ручной список."""
+    """
+    Поиск групп: RapidAPI + DuckDuckGo + TG Catalog + ручной список.
+    on_progress(source, query, current, total, found, proxy_info) — вызывается при прогрессе.
+    """
     all_groups: dict[str, dict] = {}
     pool = proxy_pool or ProxyPool()
     settings = Settings()
@@ -333,62 +338,72 @@ async def search_groups(
             if key and key not in all_groups:
                 all_groups[key] = g
 
+    def _report(source: str, query: str, cur: int, total: int, proxy_info: str = "") -> None:
+        if on_progress:
+            on_progress(source, query, cur, total, len(all_groups), proxy_info)
+
     # Ручной список
     _add_groups(load_manual_groups_as_list())
+    if on_progress:
+        on_progress("manual", "groups.txt", 1, 1, len(all_groups), "")
 
     keywords = load_keywords()
     themes = keywords.get("search_themes", ["vape барахолка", "вейп барахолка", "парилка"])
     cities = load_cities()
 
+    async def _run_with_progress(
+        source: str,
+        queries: list[str],
+        search_fn,
+    ) -> None:
+        total = len(queries)
+        search_min = getattr(settings, "delay_search_min", 2.0)
+        search_max = getattr(settings, "delay_search_max", 6.0)
+        for i, q in enumerate(queries):
+            proxy, proxy_info = pool.get_next_with_info() if pool.proxies else (None, "—")
+            grp = await search_fn(q, proxy)
+            _add_groups(grp)
+            _report(source, q, i + 1, total, proxy_info)
+            if i < total - 1:
+                delay = random.uniform(search_min, search_max)
+                await asyncio.sleep(delay)
+
     # Telegram Index (RapidAPI) — по городам и темам
     if api_key:
         queries_ti = [f"{theme} {city}" for theme in themes for city in cities]
         if queries_ti:
-            async def _search_ti(q: str):
-                proxy = pool.get_next() if pool.proxies else None
+            async def _do_ti(q: str, proxy: str | None):
                 return await search_telegram_index(q, api_key, proxy=proxy)
 
-            results = await asyncio.gather(*[_search_ti(q) for q in queries_ti])
-            for grp in results:
-                _add_groups(grp)
+            await _run_with_progress("RapidAPI", queries_ti, _do_ti)
 
-    # TGStat API — платный, 2.9M+ каналов
+    # TGStat API — платный
     tgstat_token = settings.tgstat_token
     if tgstat_token:
-        tgstat_queries = themes[:5] + ["vape", "вейп"]
-        tgstat_queries = list(dict.fromkeys(tgstat_queries))[:8]
-        async def _search_tgstat(q: str):
-            proxy = pool.get_next() if pool.proxies else None
+        tgstat_queries = list(dict.fromkeys(themes[:5] + ["vape", "вейп"]))[:8]
+        async def _search_tgstat(q: str, proxy: str | None):
             return await search_tgstat_api(q, tgstat_token, proxy=proxy)
 
-        results = await asyncio.gather(*[_search_tgstat(q) for q in tgstat_queries])
-        for grp in results:
-            _add_groups(grp)
+        await _run_with_progress("TGStat", tgstat_queries, _search_tgstat)
 
-    # Telemetr API — free tier 1000 req/мес
+    # Telemetr API
     telemetr_key = settings.telemetr_api_key
     if telemetr_key:
-        telemetr_queries = themes[:5] + ["vape", "вейп"]
-        telemetr_queries = list(dict.fromkeys(telemetr_queries))[:8]
-        async def _search_telemetr(q: str):
-            proxy = pool.get_next() if pool.proxies else None
+        telemetr_queries = list(dict.fromkeys(themes[:5] + ["vape", "вейп"]))[:8]
+        async def _search_telemetr(q: str, proxy: str | None):
             return await search_telemetr_api(q, telemetr_key, proxy=proxy)
 
-        results = await asyncio.gather(*[_search_telemetr(q) for q in telemetr_queries])
-        for grp in results:
-            _add_groups(grp)
+        await _run_with_progress("Telemetr", telemetr_queries, _search_telemetr)
 
-    # TG Catalog (tg-cat.com) — каталог групп, бесплатно
+    # TG Catalog (tg-cat.com) — бесплатно
     if tg_catalog_enabled:
-        catalog_queries = themes[:5] + ["vape", "вейп", "парилка", "барахолка вейп"]
-        catalog_queries = list(dict.fromkeys(catalog_queries))[:10]
-        async def _search_catalog(q: str):
-            proxy = pool.get_next() if pool.proxies else None
+        catalog_queries = list(dict.fromkeys(
+            themes[:5] + ["vape", "вейп", "парилка", "барахолка вейп"]
+        ))[:10]
+        async def _search_catalog(q: str, proxy: str | None):
             return await search_tg_catalog(q, proxy=proxy)
 
-        results = await asyncio.gather(*[_search_catalog(q) for q in catalog_queries])
-        for grp in results:
-            _add_groups(grp)
+        await _run_with_progress("TG Catalog", catalog_queries, _search_catalog)
 
     # DuckDuckGo — бесплатный поиск (site:t.me + темы)
     if ddgs_enabled:
@@ -396,13 +411,10 @@ async def search_groups(
         ddgs_queries += [f"site:t.me {theme} {city}" for theme in themes[:3] for city in cities[:8]]
         ddgs_queries = ddgs_queries[:15]
         if ddgs_queries:
-            async def _search_ddgs(q: str):
-                proxy = pool.get_next() if pool.proxies else None
+            async def _search_ddgs(q: str, proxy: str | None):
                 return await search_via_ddgs(q, proxy=proxy, max_results=15)
 
-            results = await asyncio.gather(*[_search_ddgs(q) for q in ddgs_queries])
-            for grp in results:
-                _add_groups(grp)
+            await _run_with_progress("DuckDuckGo", ddgs_queries, _search_ddgs)
 
     groups_list = list(all_groups.values())
     return filter_vape_groups(groups_list)

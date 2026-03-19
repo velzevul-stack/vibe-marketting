@@ -56,6 +56,7 @@ cp config/settings.json.example config/settings.json
 - `join_min/max` — между вступлениями в группы
 - `contact_min/max` — между добавлением в контакты
 - `invite_min/max` — между приглашениями в канал
+- `search_min/max` — между запросами поиска (умное ожидание, снижает риск бана)
 
 ---
 

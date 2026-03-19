@@ -5,6 +5,7 @@ import random
 from pathlib import Path
 
 from rich.console import Console
+from rich.live import Live
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich.table import Table
@@ -97,11 +98,47 @@ async def _run_search() -> None:
     if not any([s.telegram_index_api_key, s.tgstat_token, s.telemetr_api_key]):
         console.print("[yellow]API-ключи (RapidAPI/TGStat/Telemetr) не заданы. Используются бесплатные источники.[/]")
     console.print(f"[dim]Источники: {' + '.join(sources)}[/]")
-    groups = await search_groups(api_key)
+    console.print()
+
+    progress_state = {"source": "", "query": "", "cur": 0, "total": 1, "found": 0, "proxy": ""}
+    live_ref: list = []
+
+    def make_panel() -> Panel:
+        src = progress_state["source"]
+        q = progress_state["query"]
+        cur = progress_state["cur"]
+        tot = progress_state["total"]
+        found = progress_state["found"]
+        proxy = progress_state["proxy"]
+        pct = (cur / tot * 100) if tot else 0
+        bar = "█" * int(pct / 5) + "░" * (20 - int(pct / 5))
+        proxy_line = f"[dim]Прокси:[/] [yellow]{proxy}[/]\n" if proxy else ""
+        return Panel(
+            f"[cyan]{src}[/]\n"
+            f"[dim]Запрос:[/] {q[:60]}{'...' if len(q) > 60 else ''}\n"
+            f"{proxy_line}"
+            f"[green][{bar}][/] {cur}/{tot} ({pct:.0f}%)\n"
+            f"[bold]Найдено групп:[/] [green]{found}[/]",
+            title="[bold]Поиск[/]",
+            border_style="blue",
+        )
+
+    def on_progress(source: str, query: str, cur: int, total: int, found: int, proxy_info: str = "") -> None:
+        progress_state.update(source=source, query=query, cur=cur, total=total, found=found, proxy=proxy_info)
+        if live_ref:
+            live_ref[0].update(make_panel())
+
+    with Live(make_panel(), refresh_per_second=4, console=console) as live:
+        live_ref.append(live)
+        groups = await search_groups(api_key, on_progress=on_progress)
+        progress_state["cur"] = progress_state["total"]
+        progress_state["found"] = len(groups)
+        live.update(make_panel())
+
     out_path = Path("output") / "found_groups.json"
     out_path.parent.mkdir(exist_ok=True)
     out_path.write_text(json.dumps(groups, ensure_ascii=False, indent=2), encoding="utf-8")
-    console.print(f"[green]Найдено групп: {len(groups)}[/]")
+    console.print(f"\n[green]Найдено групп: {len(groups)}[/]")
     from collections import Counter
     by_source = Counter(g.get("source", "?") for g in groups)
     for src, cnt in by_source.most_common():
@@ -266,12 +303,32 @@ async def _run_stats() -> None:
     db = get_db()
     await db.init()
     hot, warm = await db.count_users()
-    table = Table(title="Статистика базы")
+
+    # Найденные группы
+    found_groups_path = Path("output") / "found_groups.json"
+    found_count = 0
+    by_source = {}
+    if found_groups_path.exists():
+        try:
+            groups = json.loads(found_groups_path.read_text(encoding="utf-8"))
+            found_count = len(groups) if isinstance(groups, list) else 0
+            from collections import Counter
+            by_source = Counter(g.get("source", "?") for g in groups) if isinstance(groups, list) else {}
+        except Exception:
+            pass
+
+    table = Table(title="Статистика")
     table.add_column("Категория", style="cyan")
     table.add_column("Количество", style="green")
-    table.add_row("Горячие", str(hot))
-    table.add_row("Тёплые", str(warm))
-    table.add_row("Всего", str(hot + warm))
+    table.add_row("[bold]Найденные группы[/]", str(found_count))
+    if by_source:
+        for src, cnt in sorted(by_source.items(), key=lambda x: -x[1]):
+            table.add_row(f"  [dim]{src}[/]", str(cnt))
+    table.add_row("", "")
+    table.add_row("[bold]Продавцы в базе[/]", "")
+    table.add_row("  Горячие", str(hot))
+    table.add_row("  Тёплые", str(warm))
+    table.add_row("  Всего", str(hot + warm))
     console.print(table)
 
 

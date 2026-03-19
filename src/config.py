@@ -28,6 +28,8 @@ class Settings:
         self.delay_contact_max: int = delays.get("contact_max", 180)
         self.delay_invite_min: int = delays.get("invite_min", 90)
         self.delay_invite_max: int = delays.get("invite_max", 240)
+        self.delay_search_min: float = delays.get("search_min", 2.0)
+        self.delay_search_max: float = delays.get("search_max", 6.0)
         self.telegram_index_api_key: str | None = self._data.get("telegram_index_api_key") or None
         self.ddgs_search_enabled: bool = self._data.get("ddgs_search_enabled", True)
         self.tg_catalog_enabled: bool = self._data.get("tg_catalog_enabled", True)
@@ -123,6 +125,26 @@ def load_proxies() -> list[str]:
     return result
 
 
+def _mask_proxy_display(proxy: str | None) -> str:
+    """Безопасное отображение прокси: host:***:port."""
+    if not proxy:
+        return "—"
+    import re
+    m = re.search(r"@([^:/]+):(\d+)", proxy)
+    if m:
+        host, port = m.group(1), m.group(2)
+        if len(host) > 8:
+            host = host[:4] + "***" + host[-2:]
+        return f"{host}:{port}"
+    m = re.search(r"://([^:/]+):(\d+)", proxy)
+    if m:
+        host, port = m.group(1), m.group(2)
+        if len(host) > 8:
+            host = host[:4] + "***" + host[-2:]
+        return f"{host}:{port}"
+    return "***"
+
+
 class ProxyPool:
     """Пул прокси для поиска и сбора базы. Round-robin."""
 
@@ -137,6 +159,15 @@ class ProxyPool:
         p = self._proxies[self._index % len(self._proxies)]
         self._index += 1
         return p
+
+    def get_next_with_info(self) -> tuple[str | None, str]:
+        """(proxy, display_str). display_str = 'Прокси 3/7: host:port'."""
+        p = self.get_next()
+        n = len(self._proxies)
+        idx = (self._index - 1) % n + 1 if n else 0
+        disp = _mask_proxy_display(p)
+        info = f"{idx}/{n} ({disp})" if n else "—"
+        return p, info
 
     @property
     def proxies(self) -> list[str]:
