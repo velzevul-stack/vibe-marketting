@@ -29,6 +29,10 @@ class Settings:
         self.delay_invite_min: int = delays.get("invite_min", 90)
         self.delay_invite_max: int = delays.get("invite_max", 240)
         self.telegram_index_api_key: str | None = self._data.get("telegram_index_api_key") or None
+        self.ddgs_search_enabled: bool = self._data.get("ddgs_search_enabled", True)
+        self.tg_catalog_enabled: bool = self._data.get("tg_catalog_enabled", True)
+        self.tgstat_token: str | None = self._data.get("tgstat_token") or None
+        self.telemetr_api_key: str | None = self._data.get("telemetr_api_key") or None
 
 
 

@@ -1,5 +1,24 @@
 # Настройка прокси и аккаунтов
 
+## Поиск групп: источники
+
+| Источник | API-ключ | Описание |
+|----------|----------|----------|
+| **RapidAPI (Telegram Index)** | `telegram_index_api_key` | Платный, поиск по городам и темам |
+| **TGStat** | `tgstat_token` | Платный, 2.9M+ каналов (api.tgstat.ru) |
+| **Telemetr** | `telemetr_api_key` | Free: 1000 req/мес, 1.8M+ каналов (api.telemetr.io) |
+| **TG Catalog (tg-cat.com)** | Не нужен | Бесплатный каталог (1000+ вейп-чатов) |
+| **DuckDuckGo (ddgs)** | Не нужен | Бесплатный веб-поиск site:t.me |
+| **Ручной список** | — | config/groups.txt |
+
+**Дедупликация:** все источники объединяются без дублей (по t.me/username).
+
+В `settings.json`:
+- `"tgstat_token": ""` — токен с tgstat.ru (API Stat S+)
+- `"telemetr_api_key": ""` — ключ из @telemetrio_api_bot
+- `"ddgs_search_enabled": false` — отключить DuckDuckGo
+- `"tg_catalog_enabled": false` — отключить TG Catalog
+
 ## Прокси
 
 ### Форматы

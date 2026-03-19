@@ -2,6 +2,10 @@
   "_comment": "Скопируйте в settings.json и заполните. Строки с _comment игнорируются.",
 
   "telegram_index_api_key": "",
+  "tgstat_token": "",
+  "telemetr_api_key": "",
+  "ddgs_search_enabled": true,
+  "tg_catalog_enabled": true,
 
   "proxies": {
     "source": "files",

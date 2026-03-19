@@ -2,10 +2,18 @@
 import asyncio
 import re
 from pathlib import Path
+from urllib.parse import unquote
 
 import httpx
 
-from src.config import load_keywords, load_exclude_keywords, load_cities, load_manual_groups, ProxyPool
+from src.config import (
+    load_keywords,
+    load_exclude_keywords,
+    load_cities,
+    load_manual_groups,
+    ProxyPool,
+    Settings,
+)
 
 
 def _has_vape_marker(text: str, markers: list[str]) -> bool:
@@ -100,37 +108,301 @@ def _extract_username_from_link(link: str) -> str | None:
     return m.group(1) if m else None
 
 
-async def search_groups(
-    api_key: str | None = None, proxy_pool: ProxyPool | None = None
+def _normalize_group_key(link: str | None, group_id: str | None = None) -> str:
+    """
+    Канонический ключ для дедупликации: t.me/username (lowercase).
+    Исключает дубли из разных источников (RapidAPI, TGStat, Telemetr, DDGS, tg-cat).
+    """
+    if link:
+        m = re.search(r"t\.me/([a-zA-Z0-9_-]+)", link, re.I)
+        if m:
+            return f"t.me/{m.group(1).lower()}"
+    if group_id:
+        clean = str(group_id).strip().lstrip("@").lower()
+        if clean and re.match(r"^[a-zA-Z0-9_-]+$", clean):
+            return f"t.me/{clean}"
+    return (link or group_id or "").lower()
+
+
+def _extract_tme_links_from_ddgs_results(results: list[dict]) -> list[dict]:
+    """Извлечь t.me ссылки из результатов DuckDuckGo."""
+    seen: set[str] = set()
+    groups: list[dict] = []
+    for r in results:
+        href = (r.get("href") or r.get("url") or "").strip()
+        title = (r.get("title") or "").strip()
+        if not href:
+            continue
+        # Декодируем URL (реддиректы могут содержать закодированный target)
+        href_decoded = unquote(href)
+        # Ищем t.me/username, t.me/s/username (preview), t.me/joinchat/hash
+        for match in re.finditer(r"t\.me/(?:s/)?([a-zA-Z0-9_-]+)(?:/([a-zA-Z0-9_-]+))?", href_decoded):
+            slug = match.group(1)
+            sub = match.group(2) or ""
+            if slug.lower() in ("share", "proxy"):
+                continue
+            # t.me/s/xxx -> используем xxx как username
+            link = f"https://t.me/{slug}" + (f"/{sub}" if sub else "")
+            if link in seen:
+                continue
+            seen.add(link)
+            groups.append({
+                "id": slug,
+                "title": title or slug,
+                "link": link,
+                "members": 0,
+                "description": "",
+                "source": "ddgs",
+            })
+    return groups
+
+
+def _search_ddgs_sync(query: str, proxy: str | None = None, max_results: int = 15) -> list[dict]:
+    """Синхронный поиск через DuckDuckGo (ddgs). Бесплатно, без API-ключа."""
+    try:
+        from ddgs import DDGS
+        ddgs = DDGS(proxy=proxy, timeout=15) if proxy else DDGS(timeout=15)
+        results = list(ddgs.text(query, max_results=max_results, region="ru-ru"))
+        return _extract_tme_links_from_ddgs_results(results)
+    except Exception:
+        return []
+
+
+async def search_via_ddgs(
+    query: str, proxy: str | None = None, max_results: int = 15
 ) -> list[dict]:
-    """Поиск групп: Telegram Index + ручной список. С прокси для API."""
+    """Поиск через DuckDuckGo (ddgs). Бесплатно, без API-ключа. С поддержкой прокси."""
+    return await asyncio.to_thread(_search_ddgs_sync, query, proxy, max_results)
+
+
+TG_CATALOG_BASE = "https://tg-cat.com"
+TG_CATALOG_USERNAME_RE = re.compile(r"tg-cat\.com/@([a-zA-Z0-9_]+)", re.I)
+
+
+async def search_tgstat_api(
+    query: str, token: str, proxy: str | None = None, country: str = "by"
+) -> list[dict]:
+    """
+    Поиск через TGStat API (api.tgstat.ru).
+    Требует токен, платный (API Stat S+). 2.9M+ каналов и чатов.
+    """
+    if not token or len(query.strip()) < 3:
+        return []
+    url = "https://api.tgstat.ru/channels/search"
+    params = {
+        "token": token,
+        "q": query.strip(),
+        "peer_type": "chat",
+        "country": country,
+        "limit": 100,
+    }
+    groups: list[dict] = []
+    try:
+        async with httpx.AsyncClient(timeout=30, proxy=proxy) as client:
+            r = await client.get(url, params=params)
+            data = r.json()
+        if data.get("status") != "ok":
+            return []
+        items = data.get("response", {}).get("items", [])
+        for ch in items:
+            link = ch.get("link", "") or ""
+            username = (ch.get("username") or "").lstrip("@")
+            if not link and username:
+                link = f"https://t.me/{username}"
+            if not link:
+                continue
+            if not link.startswith("http"):
+                link = f"https://{link}"
+            groups.append({
+                "id": username or link.split("/")[-1],
+                "title": ch.get("title", "") or username,
+                "link": link,
+                "members": ch.get("participants_count", 0),
+                "description": ch.get("about", ""),
+                "source": "tgstat",
+            })
+    except Exception:
+        pass
+    return groups
+
+
+async def search_telemetr_api(
+    query: str, api_key: str, proxy: str | None = None
+) -> list[dict]:
+    """
+    Поиск через Telemetr API (api.telemetr.io).
+    Free: 1000 req/мес. 1.8M+ каналов.
+    Два запроса: search → info-batch (для получения link).
+    """
+    if not api_key or not query.strip():
+        return []
+    headers = {"x-api-key": api_key}
+    groups: list[dict] = []
+    try:
+        async with httpx.AsyncClient(timeout=30, proxy=proxy) as client:
+            r = await client.get(
+                "https://api.telemetr.io/v1/channels/search",
+                params={"term": query.strip(), "limit": 50},
+                headers=headers,
+            )
+            items = r.json()
+            if not isinstance(items, list):
+                items = items.get("channels", items.get("items", []))
+            internal_ids = [ch.get("internal_id") for ch in items if ch.get("internal_id")]
+            if not internal_ids:
+                return []
+            ids_str = ",".join(internal_ids[:100])
+            r2 = await client.get(
+                "https://api.telemetr.io/v1/channels/info-batch",
+                params={"ids": ids_str},
+                headers=headers,
+            )
+            batch = r2.json()
+        channels = batch.get("channels", [])
+        for ch in channels:
+            link = ch.get("link", "") or ""
+            if not link or "t.me" not in link:
+                continue
+            if not link.startswith("http"):
+                link = f"https://{link}"
+            username = link.split("t.me/")[-1].split("/")[0].split("?")[0]
+            groups.append({
+                "id": username,
+                "title": ch.get("title", "") or username,
+                "link": link,
+                "members": ch.get("members_count", 0),
+                "description": ch.get("description", ""),
+                "source": "telemetr",
+            })
+    except Exception:
+        pass
+    return groups
+
+
+async def search_tg_catalog(
+    query: str, proxy: str | None = None
+) -> list[dict]:
+    """
+    Поиск через каталог TG Catalog (tg-cat.com).
+    Бесплатно, без API-ключа. Парсит страницу поиска.
+    """
+    url = f"{TG_CATALOG_BASE}/"
+    params = {"search": query, "type": "supergroup"}
+    seen: set[str] = set()
+    groups: list[dict] = []
+    try:
+        async with httpx.AsyncClient(timeout=25, proxy=proxy, follow_redirects=True) as client:
+            r = await client.get(url, params=params)
+            r.raise_for_status()
+            html = r.text
+        for m in TG_CATALOG_USERNAME_RE.finditer(html):
+            username = m.group(1).lower()
+            if username in seen:
+                continue
+            seen.add(username)
+            link = f"https://t.me/{username}"
+            groups.append({
+                "id": username,
+                "title": username,
+                "link": link,
+                "members": 0,
+                "description": "",
+                "source": "tg_catalog",
+            })
+    except Exception:
+        pass
+    return groups
+
+
+async def search_groups(
+    api_key: str | None = None,
+    proxy_pool: ProxyPool | None = None,
+    use_ddgs: bool | None = None,
+    use_tg_catalog: bool | None = None,
+) -> list[dict]:
+    """Поиск групп: RapidAPI + DuckDuckGo + TG Catalog (tg-cat.com) + ручной список."""
     all_groups: dict[str, dict] = {}
     pool = proxy_pool or ProxyPool()
+    settings = Settings()
+    ddgs_enabled = use_ddgs if use_ddgs is not None else settings.ddgs_search_enabled
+    tg_catalog_enabled = use_tg_catalog if use_tg_catalog is not None else settings.tg_catalog_enabled
+
+    def _add_groups(groups: list[dict]) -> None:
+        for g in groups:
+            key = _normalize_group_key(g.get("link"), g.get("id"))
+            if key and key not in all_groups:
+                all_groups[key] = g
 
     # Ручной список
-    for g in load_manual_groups_as_list():
-        key = g.get("link") or g.get("id", "")
-        if key and key not in all_groups:
-            all_groups[key] = g
+    _add_groups(load_manual_groups_as_list())
 
-    # Telegram Index по городам и темам (с прокси, параллельно)
+    keywords = load_keywords()
+    themes = keywords.get("search_themes", ["vape барахолка", "вейп барахолка", "парилка"])
+    cities = load_cities()
+
+    # Telegram Index (RapidAPI) — по городам и темам
     if api_key:
-        keywords = load_keywords()
-        themes = keywords.get("search_themes", ["vape барахолка", "вейп барахолка", "парилка"])
-        cities = load_cities()
-
-        queries = [f"{theme} {city}" for theme in themes for city in cities]
-        if queries:
-            async def _search_one(q: str):
+        queries_ti = [f"{theme} {city}" for theme in themes for city in cities]
+        if queries_ti:
+            async def _search_ti(q: str):
                 proxy = pool.get_next() if pool.proxies else None
                 return await search_telegram_index(q, api_key, proxy=proxy)
 
-            results = await asyncio.gather(*[_search_one(q) for q in queries])
-            for groups in results:
-                for g in groups:
-                    key = g.get("link") or g.get("id", "")
-                    if key and key not in all_groups:
-                        all_groups[key] = g
+            results = await asyncio.gather(*[_search_ti(q) for q in queries_ti])
+            for grp in results:
+                _add_groups(grp)
+
+    # TGStat API — платный, 2.9M+ каналов
+    tgstat_token = settings.tgstat_token
+    if tgstat_token:
+        tgstat_queries = themes[:5] + ["vape", "вейп"]
+        tgstat_queries = list(dict.fromkeys(tgstat_queries))[:8]
+        async def _search_tgstat(q: str):
+            proxy = pool.get_next() if pool.proxies else None
+            return await search_tgstat_api(q, tgstat_token, proxy=proxy)
+
+        results = await asyncio.gather(*[_search_tgstat(q) for q in tgstat_queries])
+        for grp in results:
+            _add_groups(grp)
+
+    # Telemetr API — free tier 1000 req/мес
+    telemetr_key = settings.telemetr_api_key
+    if telemetr_key:
+        telemetr_queries = themes[:5] + ["vape", "вейп"]
+        telemetr_queries = list(dict.fromkeys(telemetr_queries))[:8]
+        async def _search_telemetr(q: str):
+            proxy = pool.get_next() if pool.proxies else None
+            return await search_telemetr_api(q, telemetr_key, proxy=proxy)
+
+        results = await asyncio.gather(*[_search_telemetr(q) for q in telemetr_queries])
+        for grp in results:
+            _add_groups(grp)
+
+    # TG Catalog (tg-cat.com) — каталог групп, бесплатно
+    if tg_catalog_enabled:
+        catalog_queries = themes[:5] + ["vape", "вейп", "парилка", "барахолка вейп"]
+        catalog_queries = list(dict.fromkeys(catalog_queries))[:10]
+        async def _search_catalog(q: str):
+            proxy = pool.get_next() if pool.proxies else None
+            return await search_tg_catalog(q, proxy=proxy)
+
+        results = await asyncio.gather(*[_search_catalog(q) for q in catalog_queries])
+        for grp in results:
+            _add_groups(grp)
+
+    # DuckDuckGo — бесплатный поиск (site:t.me + темы)
+    if ddgs_enabled:
+        ddgs_queries = [f"site:t.me {theme}" for theme in themes[:5]]
+        ddgs_queries += [f"site:t.me {theme} {city}" for theme in themes[:3] for city in cities[:8]]
+        ddgs_queries = ddgs_queries[:15]
+        if ddgs_queries:
+            async def _search_ddgs(q: str):
+                proxy = pool.get_next() if pool.proxies else None
+                return await search_via_ddgs(q, proxy=proxy, max_results=15)
+
+            results = await asyncio.gather(*[_search_ddgs(q) for q in ddgs_queries])
+            for grp in results:
+                _add_groups(grp)
 
     groups_list = list(all_groups.values())
     return filter_vape_groups(groups_list)

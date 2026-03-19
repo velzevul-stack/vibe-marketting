@@ -26,7 +26,11 @@ pip install -r requirements.txt
 Подробнее: [docs/PROXY_AND_ACCOUNTS.md](docs/PROXY_AND_ACCOUNTS.md), [config/CONFIG.md](config/CONFIG.md).
 
 1. **settings.json** — скопируйте `config/settings.json.example` в `config/settings.json`:
-   - `telegram_index_api_key` — опционально, для поиска через Telegram Index (RapidAPI)
+   - `telegram_index_api_key` — RapidAPI (Telegram Index)
+   - `tgstat_token` — TGStat API (api.tgstat.ru)
+   - `telemetr_api_key` — Telemetr API (api.telemetr.io, free 1000 req/мес)
+   - `ddgs_search_enabled` — DuckDuckGo (по умолчанию true)
+   - `tg_catalog_enabled` — TG Catalog tg-cat.com (по умолчанию true)
    - `proxies` — укажите файлы с прокси (`files`) или список (`list`)
 
 2. **accounts.json** — скопируйте `config/accounts.json.example` в `config/accounts.json`:
@@ -44,7 +48,7 @@ python main.py
 
 ## Меню
 
-- **Поиск групп** — поиск через Telegram Index API + ручной список, фильтрация обычных барахолок
+- **Поиск групп** — RapidAPI + TGStat + Telemetr + TG Catalog + DuckDuckGo + groups.txt, без дублей
 - **Сбор базы** — парсинг сообщений в группах, извлечение продавцов (горячие/тёплые)
 - **Вступить в группы** — вступление в группы из found_groups.json (публичные и приватные по invite-ссылке)
 - **Добавить в контакты** — добавление пользователей в контакты с умным распределением

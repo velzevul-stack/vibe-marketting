@@ -81,8 +81,22 @@ async def _run_search() -> None:
     """Поиск групп."""
     console.print("[bold blue]Поиск групп...[/]")
     api_key = _load_telegram_index_key()
-    if not api_key:
-        console.print("[yellow]TELEGRAM_INDEX_API_KEY не задан. Используется только ручной список.[/]")
+    s = Settings()
+    sources = []
+    if s.telegram_index_api_key:
+        sources.append("RapidAPI")
+    if s.tgstat_token:
+        sources.append("TGStat")
+    if s.telemetr_api_key:
+        sources.append("Telemetr")
+    if s.tg_catalog_enabled:
+        sources.append("TG Catalog")
+    if s.ddgs_search_enabled:
+        sources.append("DuckDuckGo")
+    sources.append("groups.txt")
+    if not any([s.telegram_index_api_key, s.tgstat_token, s.telemetr_api_key]):
+        console.print("[yellow]API-ключи (RapidAPI/TGStat/Telemetr) не заданы. Используются бесплатные источники.[/]")
+    console.print(f"[dim]Источники: {' + '.join(sources)}[/]")
     groups = await search_groups(api_key)
     out_path = Path("output") / "found_groups.json"
     out_path.parent.mkdir(exist_ok=True)
