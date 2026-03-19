@@ -129,7 +129,7 @@ async def _run_search() -> None:
         if live_ref:
             live_ref[0].update(make_panel())
 
-    with Live(make_panel(), refresh_per_second=4, console=console) as live:
+    with Live(make_panel(), refresh_per_second=4, console=console, transient=True) as live:
         live_ref.append(live)
         groups = await search_groups(api_key, on_progress=on_progress)
         progress_state["cur"] = progress_state["total"]
@@ -145,6 +145,7 @@ async def _run_search() -> None:
     for src, cnt in by_source.most_common():
         console.print(f"  [dim]{src}: {cnt}[/]")
     console.print(f"[dim]Сохранено в {out_path}[/]")
+    Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
 
 
 async def _run_scrape() -> None:
@@ -194,6 +195,7 @@ async def _run_scrape() -> None:
     total_hot = sum(r[0] for r in results)
     total_warm = sum(r[1] for r in results)
     console.print(f"\n[bold green]Итого: {total_hot} горячих, {total_warm} тёплых[/]")
+    Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
 
 
 async def _run_join_groups() -> None:
@@ -229,6 +231,7 @@ async def _run_join_groups() -> None:
         delay = max(1, random.uniform(sett.delay_join_min, sett.delay_join_max))
         await asyncio.sleep(delay)
     console.print(f"\n[bold green]Вступили в {ok_count} из {len(groups)} групп[/]")
+    Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
 
 
 async def _run_add_contacts() -> None:
@@ -260,6 +263,7 @@ async def _run_add_contacts() -> None:
             console.print(f"    {'[green]OK[/]' if ok else '[red]FAIL[/]'}")
             delay = max(1, random.uniform(mgr.settings.delay_contact_min, mgr.settings.delay_contact_max))
             await asyncio.sleep(delay)
+    Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
 
 
 async def _run_invite() -> None:
@@ -278,6 +282,7 @@ async def _run_invite() -> None:
         f"@{channel}", limit=limit, batch_size=10
     )
     console.print(f"\n[bold green]Приглашено: {invited} контактов[/] (аккаунт: {session or '—'})")
+    Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
 
 
 def _run_assign_proxies() -> None:
@@ -297,6 +302,7 @@ def _run_assign_proxies() -> None:
     path = Path(__file__).parent.parent / "config" / "accounts.json"
     path.write_text(json.dumps(accounts, ensure_ascii=False, indent=2), encoding="utf-8")
     console.print(f"[green]Прокси назначены. Сохранено в {path}[/]")
+    Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
 
 
 async def _run_stats() -> None:
@@ -331,6 +337,7 @@ async def _run_stats() -> None:
     table.add_row("  Тёплые", str(warm))
     table.add_row("  Всего", str(hot + warm))
     console.print(table)
+    Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
 
 
 def _run_view_groups() -> None:
@@ -364,6 +371,7 @@ def _run_view_groups() -> None:
         table.add_row(str(i), g.get("source", "?"), link, title)
     console.print(table)
     console.print(f"[dim]Всего групп: {len(groups)}. Файл: {found_path}[/]")
+    Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
 
 
 def run_menu() -> None:
