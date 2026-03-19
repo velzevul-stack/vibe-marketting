@@ -11,10 +11,11 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskPr
 from rich.table import Table
 from rich.prompt import Prompt, Confirm
 
-from src.config import Settings, load_accounts, load_proxies
+from src.config import Settings, load_accounts, load_proxies, mask_proxy_display
 from src.db import get_db
 from src.search import search_groups, load_manual_groups_as_list
 from src.verify.scraper import scrape_group
+from src.verify.proxy_checker import check_proxies
 from src.invite import InviteManager, AccountPool
 
 console = Console()
@@ -74,9 +75,10 @@ def _render_main_menu() -> str:
     console.print("[6] Статистика базы")
     console.print("[7] Назначить прокси аккаунтам")
     console.print("[8] Просмотр найденных групп")
+    console.print("[9] Проверить прокси")
     console.print("[0] Выход")
     console.print()
-    return Prompt.ask("Выберите действие", choices=["0", "1", "2", "3", "4", "5", "6", "7", "8"], default="0")
+    return Prompt.ask("Выберите действие", choices=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"], default="0")
 
 
 async def _run_search() -> None:
@@ -285,6 +287,48 @@ async def _run_invite() -> None:
     Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
 
 
+async def _run_check_proxies() -> None:
+    """Проверить работоспособность прокси из пула."""
+    proxies = load_proxies()
+    if not proxies:
+        console.print("[red]Нет прокси. Добавьте в config/proxies.txt или settings.json[/]")
+        Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
+        return
+
+    console.print(f"[bold blue]Проверка {len(proxies)} прокси...[/]")
+    console.print("[dim]Используется api.telegram.org, таймаут 15 сек[/]\n")
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Проверка...", total=len(proxies))
+        results = await check_proxies(proxies, max_concurrent=10)
+        progress.update(task, completed=len(proxies))
+
+    ok_list = [r for r in results if r.ok]
+    fail_list = [r for r in results if not r.ok]
+
+    table = Table(title="Результаты проверки прокси")
+    table.add_column("#", style="dim", width=4)
+    table.add_column("Прокси", style="cyan")
+    table.add_column("Статус", style="green")
+    table.add_column("Задержка / Ошибка", style="white")
+
+    for i, r in enumerate(results, 1):
+        disp = mask_proxy_display(r.proxy)
+        status = "[green]OK[/]" if r.ok else "[red]FAIL[/]"
+        extra = f"{r.latency_ms:.0f} мс" if r.latency_ms else (r.error or "—")
+        table.add_row(str(i), disp, status, extra)
+
+    console.print(table)
+    console.print(f"\n[bold green]Рабочих: {len(ok_list)}[/] | [bold red]Не работают: {len(fail_list)}[/]")
+    Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
+
+
 def _run_assign_proxies() -> None:
     """Назначить прокси из пула аккаунтам (перестроить под TG-аккаунты)."""
     accounts = load_accounts()
@@ -397,6 +441,8 @@ def run_menu() -> None:
                 _run_assign_proxies()
             elif choice == "8":
                 _run_view_groups()
+            elif choice == "9":
+                asyncio.run(_run_check_proxies())
         except KeyboardInterrupt:
             console.print("\n[yellow]Прервано.[/]")
         except Exception as e:

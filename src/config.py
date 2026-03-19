@@ -125,7 +125,7 @@ def load_proxies() -> list[str]:
     return result
 
 
-def _mask_proxy_display(proxy: str | None) -> str:
+def mask_proxy_display(proxy: str | None) -> str:
     """Безопасное отображение прокси: host:***:port."""
     if not proxy:
         return "—"
@@ -165,7 +165,7 @@ class ProxyPool:
         p = self.get_next()
         n = len(self._proxies)
         idx = (self._index - 1) % n + 1 if n else 0
-        disp = _mask_proxy_display(p)
+        disp = mask_proxy_display(p)
         info = f"{idx}/{n} ({disp})" if n else "—"
         return p, info
 
