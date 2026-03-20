@@ -14,7 +14,13 @@ from telethon.tl.functions.contacts import AddContactRequest, GetContactsRequest
 from telethon.tl.functions.channels import InviteToChannelRequest, JoinChannelRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest
 
-from src.config import load_accounts, load_proxies, Settings, telethon_session_file
+from src.config import (
+    load_accounts,
+    load_proxies,
+    proxy_url_to_telethon,
+    Settings,
+    telethon_session_file,
+)
 
 
 @dataclass
@@ -121,11 +127,12 @@ class AccountPool:
             proxy = acc.get("proxy")
         if not proxy and self._proxy_pool:
             proxy = self._get_next_proxy()
+        proxy_tg = proxy_url_to_telethon(proxy)
         return TelegramClient(
             str(session_path),
             api_id,
             api_hash,
-            proxy=proxy,
+            proxy=proxy_tg,
         )
 
 

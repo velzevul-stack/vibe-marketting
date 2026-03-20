@@ -1,7 +1,7 @@
 """Конфигурация приложения."""
 import json
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlparse
 
 
 def _config_dir() -> Path:
@@ -89,11 +89,15 @@ def telethon_session_file(session_name: str, settings: Settings | None = None) -
     return telethon_session_dir_path(settings) / f"{session_name}.session"
 
 
-def assign_proxies_round_robin_to_accounts() -> tuple[bool, str]:
+def assign_proxies_round_robin_to_accounts(
+    settings: Settings | None = None,
+) -> tuple[bool, str]:
     """
     Назначить прокси из пула аккаунтам (round-robin).
     Сохраняет весь accounts.json (включая служебные строки), не только список аккаунтов.
+    Дополнительно: если есть ``sessions/<имя>.json``, в него пишется то же поле ``proxy``.
     """
+    s = settings or Settings()
     proxies = load_proxies()
     if not proxies:
         return False, "Нет прокси в пуле (proxies.txt / settings.json)"
@@ -102,7 +106,11 @@ def assign_proxies_round_robin_to_accounts() -> tuple[bool, str]:
     if not tele:
         return False, "Нет аккаунтов в accounts.json"
     for i, acc in enumerate(tele):
-        acc["proxy"] = proxies[i % len(proxies)]
+        p = proxies[i % len(proxies)]
+        acc["proxy"] = p
+        name = acc.get("session_name")
+        if name:
+            write_proxy_to_session_sidecar(str(name), p, s)
     save_accounts_all(all_rows)
     return True, str(accounts_json_path())
 
@@ -178,6 +186,91 @@ def normalize_proxy_line(line: str) -> str:
     if len(parts) == 2 and parts[1].isdigit():
         return f"http://{parts[0]}:{parts[1]}"
     return line
+
+
+def proxy_url_to_telethon(
+    proxy: str | tuple | list | dict | None,
+) -> tuple | dict | None:
+    """
+    Telethon ожидает ``proxy`` как tuple / list / dict (PySocks / python_socks), не строку URL.
+    Строки ``http(s)://``, ``socks4://``, ``socks5://`` (как в accounts.json после назначения)
+    преобразуются в кортеж ``(type, host, port[, rdns, user, password])``.
+    """
+    if proxy is None:
+        return None
+    if isinstance(proxy, dict):
+        return proxy
+    if isinstance(proxy, tuple):
+        return proxy
+    if isinstance(proxy, list):
+        return tuple(proxy)
+
+    raw = normalize_proxy_line(str(proxy).strip())
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    scheme = (parsed.scheme or "").lower()
+    host = parsed.hostname
+    if not host:
+        return None
+
+    port = parsed.port
+    if scheme in ("http", "https"):
+        ptype = "http"
+        if port is None:
+            port = 443 if scheme == "https" else 80
+    elif scheme == "socks5":
+        ptype = "socks5"
+        if port is None:
+            port = 1080
+    elif scheme == "socks4":
+        ptype = "socks4"
+        if port is None:
+            port = 1080
+    else:
+        ptype = "http"
+        if port is None:
+            port = 8080
+
+    user = parsed.username
+    password = parsed.password
+    if user:
+        user = unquote(user)
+    if password:
+        password = unquote(password)
+
+    try:
+        port_i = int(port)
+    except (TypeError, ValueError):
+        return None
+
+    if user or password:
+        return (ptype, host, port_i, True, user or None, password or None)
+    return (ptype, host, port_i)
+
+
+def write_proxy_to_session_sidecar(
+    session_name: str, proxy_url: str, settings: Settings | None = None
+) -> None:
+    """
+    Если рядом с сессией есть ``<session_name>.json``, дописать/обновить поле ``proxy`` (URL строкой).
+    Сам .session Telethon прокси не хранит — только для единого места рядом с api.
+    """
+    if not (session_name or "").strip() or not (proxy_url or "").strip():
+        return
+    s = settings or Settings()
+    path = telethon_session_dir_path(s) / f"{session_name.strip()}.json"
+    if not path.is_file():
+        return
+    try:
+        text = path.read_text(encoding="utf-8-sig").strip()
+        data: dict = json.loads(text) if text else {}
+        if not isinstance(data, dict):
+            return
+        data["proxy"] = str(proxy_url).strip()
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        pass
 
 
 def _read_proxy_file(filepath: Path) -> list[str]:

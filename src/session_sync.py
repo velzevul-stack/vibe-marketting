@@ -45,31 +45,34 @@ def _pick_api_from_dict(d: dict) -> tuple[int | None, str | None]:
 
 def _read_sidecar_session_json(
     session_dir: Path, stem: str
-) -> tuple[int | None, str | None, str | None, str | None]:
+) -> tuple[int | None, str | None, str | None, str | None, str | None]:
     """
-    Читает <stem>.json рядом с .session → (api_id, api_hash, phone, ошибка_парсинга).
+    Читает <stem>.json рядом с .session → (api_id, api_hash, phone, ошибка_парсинга, proxy_url).
     ошибка_парсинга — если файл есть, но JSON битый/пустой.
     """
     path = session_dir / f"{stem}.json"
     if not path.is_file():
-        return None, None, None, None
+        return None, None, None, None, None
     try:
         raw = path.read_text(encoding="utf-8-sig").strip()
     except OSError as e:
-        return None, None, None, f"{stem}.json: не прочитать ({e})"
+        return None, None, None, f"{stem}.json: не прочитать ({e})", None
     if not raw:
-        return None, None, None, f"{stem}.json пустой"
+        return None, None, None, f"{stem}.json пустой", None
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
-        return None, None, None, f"{stem}.json: невалидный JSON ({e.msg})"
+        return None, None, None, f"{stem}.json: невалидный JSON ({e.msg})", None
     if not isinstance(data, dict):
-        return None, None, None, f"{stem}.json: ожидался объект {{}}, не список/строка"
+        return None, None, None, f"{stem}.json: ожидался объект {{}}, не список/строка", None
     aid, ahash = _pick_api_from_dict(data)
     phone = data.get("phone") or data.get("phone_number")
     if phone is not None:
         phone = str(phone).strip() or None
-    return aid, ahash, phone, None
+    proxy_url = data.get("proxy")
+    if proxy_url is not None:
+        proxy_url = str(proxy_url).strip() or None
+    return aid, ahash, phone, None, proxy_url
 
 
 def sync_sessions_dir_to_accounts(settings: Settings | None = None) -> tuple[int, list[str]]:
@@ -100,7 +103,9 @@ def sync_sessions_dir_to_accounts(settings: Settings | None = None) -> tuple[int
         if stem in in_json:
             continue
 
-        aid, ahash, phone, sidecar_err = _read_sidecar_session_json(session_dir, stem)
+        aid, ahash, phone, sidecar_err, sidecar_proxy = _read_sidecar_session_json(
+            session_dir, stem
+        )
         if sidecar_err:
             warns.append(sidecar_err)
         if aid is None or not ahash:
@@ -112,7 +117,7 @@ def sync_sessions_dir_to_accounts(settings: Settings | None = None) -> tuple[int
             )
             continue
 
-        upsert_telethon_account(stem, aid, ahash, phone=phone)
+        upsert_telethon_account(stem, aid, ahash, phone=phone, proxy=sidecar_proxy)
         in_json.add(stem)
         added += 1
 

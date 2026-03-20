@@ -18,6 +18,7 @@ from src.config import (
     effective_2fa_password,
     load_accounts,
     load_proxies,
+    proxy_url_to_telethon,
     telethon_session_file,
 )
 
@@ -29,7 +30,7 @@ def _client_for(acc: dict, proxy: str | None, settings: Settings) -> TelegramCli
         str(path),
         int(acc["api_id"]),
         str(acc["api_hash"]),
-        proxy=proxy,
+        proxy=proxy_url_to_telethon(proxy),
     )
 
 
