@@ -3,6 +3,7 @@ import asyncio
 import json
 import random
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -33,6 +34,39 @@ from src.accounts_bulk_prepare import run_bulk_account_prepare
 from src.session_sync import sync_sessions_dir_to_accounts
 
 console = Console()
+
+_FOUND_GROUPS_PREVIOUS = Path("output") / "found_groups.previous.json"
+_FOUND_GROUPS_ARCHIVE_DIR = Path("output") / "found_groups_archive"
+
+
+def _snapshot_found_groups_before_overwrite(found_path: Path) -> bool:
+    """
+    Если found_groups.json есть и в нём непустой список групп — сохранить копию
+    в found_groups.previous.json (и дубликат с меткой времени в found_groups_archive/).
+    Возвращает True, если снимок записан.
+    """
+    if not found_path.is_file():
+        return False
+    try:
+        body = found_path.read_text(encoding="utf-8")
+        raw = body.strip()
+        if not raw:
+            return False
+        data = json.loads(raw)
+        if not isinstance(data, list) or len(data) == 0:
+            return False
+    except (json.JSONDecodeError, OSError):
+        return False
+    try:
+        found_path.parent.mkdir(parents=True, exist_ok=True)
+        _FOUND_GROUPS_PREVIOUS.write_text(body, encoding="utf-8")
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        _FOUND_GROUPS_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+        arc = _FOUND_GROUPS_ARCHIVE_DIR / f"found_groups_{ts}.json"
+        arc.write_text(body, encoding="utf-8")
+    except OSError:
+        return False
+    return True
 
 
 def _group_link_key(g: dict) -> str:
@@ -202,12 +236,16 @@ def _render_main_menu() -> str:
     console.print(f"{_mi('8')} Прокси, сессии и аккаунты…")
     console.print(f"{_mi('0')} Выход")
     console.print(
-        "[dim]Ввод: 0–9. Очистка результатов поиска — всегда [bold]9[/].[/]"
+        "[cyan]a[/]  База продавцов ([dim]SQLite users[/]): удалить записи [bold]без[/] признаков РБ "
+        "([dim]username + metadata, города cities_by[/])"
+    )
+    console.print(
+        "[dim]Ввод: 0–9 или a. П.9 — только [bold]found_groups.json[/], не vibe_marketing.db.[/]"
     )
     console.print()
     return Prompt.ask(
         "Выберите действие",
-        choices=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
+        choices=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a"],
         default="0",
     )
 
@@ -327,18 +365,64 @@ async def _run_search() -> None:
         if live_ref:
             live_ref[0].update(make_panel())
 
+    search_diag: dict = {}
     with Live(make_panel(), refresh_per_second=4, console=console, transient=True) as live:
         live_ref.append(live)
-        groups = await search_groups(api_key, on_progress=on_progress)
+        groups = await search_groups(api_key, on_progress=on_progress, diagnostics=search_diag)
         progress_state["cur"] = progress_state["total"]
         progress_state["found"] = len(groups)
         live.update(make_panel())
 
     out_path = Path("output") / "found_groups.json"
     out_path.parent.mkdir(exist_ok=True)
+    if _snapshot_found_groups_before_overwrite(out_path):
+        console.print(
+            f"[dim]Предыдущий список сохранён:[/] [cyan]{_FOUND_GROUPS_PREVIOUS}[/] "
+            f"и в [cyan]{_FOUND_GROUPS_ARCHIVE_DIR}/[/]"
+        )
     out_path.write_text(json.dumps(groups, ensure_ascii=False, indent=2), encoding="utf-8")
     console.print(f"\n[green]Найдено групп: {len(groups)}[/]")
     console.print("  [dim](после сбора: вейп-фильтр по keywords/exclude_keywords)[/]")
+    if not groups and search_diag:
+        raw = search_diag.get("raw", 0)
+        av = search_diag.get("after_vape", 0)
+        fin = search_diag.get("final", 0)
+        cc = search_diag.get("cities_query_count")
+        th = search_diag.get("themes_count")
+        nresp = search_diag.get("responses_with_groups", 0)
+        err = search_diag.get("first_error")
+        console.print("\n[bold yellow]Диагностика (почему 0):[/]")
+        if cc is not None and cc == 0:
+            console.print(
+                "  [red]•[/] В запросах [bold]0 городов[/] "
+                "(проверьте cities_by.json и блоклист РФ в settings: exclude_russian_cities_in_search)."
+            )
+        console.print(f"  [dim]•[/] Сырых записей до фильтров: [bold]{raw}[/]")
+        console.print(f"  [dim]•[/] После вейп-фильтра: [bold]{av}[/] → итог: [bold]{fin}[/]")
+        console.print(
+            f"  [dim]•[/] Запросов, где API вернули хотя бы одну группу: [bold]{nresp}[/]"
+        )
+        if th is not None and cc is not None:
+            console.print(f"  [dim]•[/] Тем: {th}, городов в запросах: {cc}")
+        if raw == 0:
+            console.print(
+                "  [dim]Подсказка:[/] источники ничего не вернули — часто виноваты "
+                "[bold]прокси[/] (блок/таймаут), пустой ответ tg-cat/ddgs, нет ключей API. "
+                "Попробуйте без прокси или другой пул."
+            )
+        elif av == 0 and raw > 0:
+            console.print(
+                "  [dim]Подсказка:[/] группы были, но [bold]все отсеяны vape_markers[/] "
+                "— в title/description нет слов из keywords.json → vape_markers "
+                "(или отключите vape_markers_required в exclude_keywords.json)."
+            )
+        elif fin == 0 and av > 0:
+            console.print(
+                "  [dim]Подсказка:[/] остаток отсеян [bold]фильтром городов РФ[/] "
+                "(russian_cities_blocklist / exclude_russian_cities_in_search)."
+            )
+        if err:
+            console.print(f"  [red]Первая ошибка запроса:[/] {escape(str(err))}")
     from collections import Counter
     by_source = Counter(g.get("source", "?") for g in groups)
     for src, cnt in by_source.most_common():
@@ -680,6 +764,38 @@ def _run_assign_proxies() -> None:
     Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
 
 
+async def _run_purge_users_belarus() -> None:
+    """Удалить из SQLite users строки без эвристики «Беларусь»."""
+    db = get_db()
+    await db.init()
+    n_drop, n_keep = await db.preview_belarus_user_purge()
+    total = n_drop + n_keep
+    if total == 0:
+        console.print("[yellow]Таблица users пуста — нечего фильтровать.[/]")
+        Prompt.ask("\n[dim]Нажмите Enter…[/]", default="")
+        return
+    console.print(
+        "[bold]Фильтр базы продавцов (SQLite)[/] [dim]output/vibe_marketing.db → users[/]\n"
+        f"Сейчас записей: [white]{total}[/]. По эвристике РБ (маркеры + города из [bold]data/cities_by.json[/] "
+        f"в username и metadata): [green]оставить {n_keep}[/], [red]удалить {n_drop}[/]."
+    )
+    console.print(
+        "[yellow]П.9 чистит только found_groups.json; это действие необратимо для users. "
+        "Скопируйте vibe_marketing.db при сомнениях.[/]"
+    )
+    if n_drop == 0:
+        console.print("[green]Удалять нечего — все строки уже с признаками РБ (или база пуста).[/]")
+        Prompt.ask("\n[dim]Нажмите Enter…[/]", default="")
+        return
+    if not Confirm.ask(f"Удалить {n_drop} записей из users?", default=False):
+        console.print("[dim]Отменено.[/]")
+        Prompt.ask("\n[dim]Нажмите Enter…[/]", default="")
+        return
+    deleted, kept = await db.purge_users_without_belarus_signals()
+    console.print(f"[green]Готово:[/] удалено [bold]{deleted}[/], осталось [bold]{kept}[/].")
+    Prompt.ask("\n[dim]Нажмите Enter…[/]", default="")
+
+
 async def _run_stats() -> None:
     """Статистика базы."""
     db = get_db()
@@ -751,6 +867,11 @@ def _run_view_groups() -> None:
     )
     if Confirm.ask("Очистить found_groups.json (все записи)?", default=False):
         found_path.parent.mkdir(parents=True, exist_ok=True)
+        if _snapshot_found_groups_before_overwrite(found_path):
+            console.print(
+                f"[dim]Копия до очистки:[/] [cyan]{_FOUND_GROUPS_PREVIOUS}[/] "
+                f"([cyan]{_FOUND_GROUPS_ARCHIVE_DIR}/[/])"
+            )
         found_path.write_text("[]\n", encoding="utf-8")
         console.print("[green]Список найденных групп очищен.[/]")
     Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
@@ -776,6 +897,11 @@ def _run_clear_found_groups() -> None:
         Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
         return
     found_path.parent.mkdir(parents=True, exist_ok=True)
+    if _snapshot_found_groups_before_overwrite(found_path):
+        console.print(
+            f"[dim]Копия до очистки:[/] [cyan]{_FOUND_GROUPS_PREVIOUS}[/] "
+            f"и [cyan]{_FOUND_GROUPS_ARCHIVE_DIR}/[/] — можно скопировать обратно в found_groups.json[/]"
+        )
     found_path.write_text("[]\n", encoding="utf-8")
     console.print("[green]Список найденных групп очищен.[/] Запустите п.1 для нового поиска.")
     Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
@@ -829,6 +955,8 @@ def run_menu() -> None:
                 _run_view_groups()
             elif choice == "9":
                 _run_clear_found_groups()
+            elif choice == "a":
+                asyncio.run(_run_purge_users_belarus())
             elif choice == "8":
                 _run_proxy_session_submenu()
         except KeyboardInterrupt:

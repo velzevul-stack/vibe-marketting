@@ -19,6 +19,19 @@ from src.config import (
 )
 
 
+def _diag_error(diagnostics: dict | None, exc: BaseException, query: str = "") -> None:
+    if diagnostics is None or diagnostics.get("first_error"):
+        return
+    q = (query or "")[:100]
+    diagnostics["first_error"] = f"{type(exc).__name__}: {exc}" + (f" · запрос {q!r}" if q else "")
+
+
+def _diag_note_nonempty(diagnostics: dict | None, n: int) -> None:
+    if diagnostics is None or n <= 0:
+        return
+    diagnostics["responses_with_groups"] = diagnostics.get("responses_with_groups", 0) + 1
+
+
 def _has_vape_marker(text: str, markers: list[str]) -> bool:
     """Проверить наличие вейп-маркера в тексте."""
     if not text:
@@ -385,7 +398,8 @@ async def search_groups(
     proxy_pool: ProxyPool | None = None,
     use_ddgs: bool | None = None,
     use_tg_catalog: bool | None = None,
-    on_progress: "callable[[str, str, int, int, int, str], None] | None" = None,
+    on_progress: "callable[..., None] | None" = None,
+    diagnostics: dict | None = None,
 ) -> list[dict]:
     """
     Поиск групп: источники + ручной список. По API/каталогу/DDGS — только запросы
@@ -395,6 +409,8 @@ async def search_groups(
     и filter_exclude_russian_city_groups.
     on_progress(source, query, current, total, found, proxy_info, worker_note="") — при прогрессе;
     worker_note — краткий статус параллельных воркеров (если включён параллельный режим).
+    Если передать diagnostics: dict, после поиска в нём будут ключи raw, after_vape, final,
+    responses_with_groups, first_error, cities_query_count, themes_count (для отладки нулевой выдачи).
     """
     all_groups: dict[str, dict] = {}
     pool = proxy_pool or ProxyPool()
@@ -435,11 +451,15 @@ async def search_groups(
     cities_for_queries = (
         filter_cities_excluding_russian_blocklist(cities, ru_block) if ru_block else list(cities)
     )
+    if diagnostics is not None:
+        diagnostics["cities_query_count"] = len(cities_for_queries)
+        diagnostics["themes_count"] = len(themes)
 
     async def _run_with_progress(
         source: str,
         queries: list[str],
         search_fn,
+        diagnostics_inner: dict | None = None,
     ) -> None:
         """
         Параллельно: по одному asyncio-воркеру на каждый прокси из пула (фиксированный прокси у воркера).
@@ -457,7 +477,12 @@ async def search_groups(
             proxy_fixed = proxies_list[0] if proxies_list else None
             disp = mask_proxy_display(proxy_fixed) if proxy_fixed else "—"
             for i, q in enumerate(queries):
-                grp = await search_fn(q, proxy_fixed)
+                try:
+                    grp = await search_fn(q, proxy_fixed)
+                except Exception as e:
+                    _diag_error(diagnostics_inner, e, q)
+                    grp = []
+                _diag_note_nonempty(diagnostics_inner, len(grp))
                 _add_groups(grp)
                 proxy_info = f"1/1 → {disp}" if proxy_fixed else "—"
                 note = "Один поток (нет пула прокси или один прокси)"
@@ -485,8 +510,10 @@ async def search_groups(
                     q = queries[qi]
                 try:
                     grp = await search_fn(q, proxy)
-                except Exception:
+                except Exception as e:
+                    _diag_error(diagnostics_inner, e, q)
                     grp = []
+                _diag_note_nonempty(diagnostics_inner, len(grp))
                 async with state_lock:
                     _add_groups(grp)
                     done_count += 1
@@ -508,7 +535,7 @@ async def search_groups(
             async def _do_ti(q: str, proxy: str | None):
                 return await search_telegram_index(q, api_key, proxy=proxy)
 
-            await _run_with_progress("RapidAPI", queries_ti, _do_ti)
+            await _run_with_progress("RapidAPI", queries_ti, _do_ti, diagnostics)
 
     # TGStat API — платный; только тема × город
     tgstat_token = settings.tgstat_token
@@ -517,7 +544,7 @@ async def search_groups(
         async def _search_tgstat(q: str, proxy: str | None):
             return await search_tgstat_api(q, tgstat_token, proxy=proxy)
 
-        await _run_with_progress("TGStat", tgstat_queries, _search_tgstat)
+        await _run_with_progress("TGStat", tgstat_queries, _search_tgstat, diagnostics)
 
     # Telemetr API — только тема × город
     telemetr_key = settings.telemetr_api_key
@@ -526,7 +553,7 @@ async def search_groups(
         async def _search_telemetr(q: str, proxy: str | None):
             return await search_telemetr_api(q, telemetr_key, proxy=proxy)
 
-        await _run_with_progress("Telemetr", telemetr_queries, _search_telemetr)
+        await _run_with_progress("Telemetr", telemetr_queries, _search_telemetr, diagnostics)
 
     # TG Catalog (tg-cat.com) — бесплатно; только тема × город
     if tg_catalog_enabled:
@@ -543,10 +570,15 @@ async def search_groups(
             async def _search_ddgs(q: str, proxy: str | None):
                 return await search_via_ddgs(q, proxy=proxy, max_results=15)
 
-            await _run_with_progress("DuckDuckGo", ddgs_queries, _search_ddgs)
+            await _run_with_progress("DuckDuckGo", ddgs_queries, _search_ddgs, diagnostics)
 
     groups_list = list(all_groups.values())
-    filtered = filter_vape_groups(groups_list)
-    if ru_block:
-        filtered = filter_exclude_russian_city_groups(filtered, ru_block)
+    vape_filtered = filter_vape_groups(groups_list)
+    filtered = (
+        filter_exclude_russian_city_groups(vape_filtered, ru_block) if ru_block else vape_filtered
+    )
+    if diagnostics is not None:
+        diagnostics["raw"] = len(groups_list)
+        diagnostics["after_vape"] = len(vape_filtered)
+        diagnostics["final"] = len(filtered)
     return filtered

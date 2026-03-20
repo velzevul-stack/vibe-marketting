@@ -5,6 +5,8 @@ from pathlib import Path
 
 import aiosqlite
 
+from src.db.belarus_filter import user_row_matches_belarus
+
 
 class Database:
     """Работа с БД."""
@@ -164,6 +166,39 @@ class Database:
             rows = await cursor.fetchall()
             counts = {row[0]: row[1] for row in rows}
             return (counts.get("hot", 0), counts.get("warm", 0))
+
+    async def preview_belarus_user_purge(self) -> tuple[int, int]:
+        """
+        Сколько записей users удалились бы эвристикой РБ (username + metadata).
+        Возвращает (будет_удалено, останется).
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT username, metadata FROM users")
+            rows = await cursor.fetchall()
+        n_drop = sum(
+            1 for r in rows if not user_row_matches_belarus(r["username"], r["metadata"])
+        )
+        return n_drop, len(rows) - n_drop
+
+    async def purge_users_without_belarus_signals(self) -> tuple[int, int]:
+        """
+        Удалить из users записи, в username+metadata которых нет эвристики «Беларусь»
+        (маркеры + города из data/cities_by.json). Возвращает (удалено, оставлено).
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT id, username, metadata FROM users")
+            rows = await cursor.fetchall()
+            to_delete: list[int] = []
+            for row in rows:
+                if not user_row_matches_belarus(row["username"], row["metadata"]):
+                    to_delete.append(int(row["id"]))
+            for uid in to_delete:
+                await db.execute("DELETE FROM users WHERE id = ?", (uid,))
+            await db.commit()
+            kept = len(rows) - len(to_delete)
+            return len(to_delete), kept
 
 
 _db: Database | None = None
