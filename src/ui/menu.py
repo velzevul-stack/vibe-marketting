@@ -366,12 +366,17 @@ async def _run_search() -> None:
             live_ref[0].update(make_panel())
 
     search_diag: dict = {}
-    with Live(make_panel(), refresh_per_second=4, console=console, transient=True) as live:
-        live_ref.append(live)
-        groups = await search_groups(api_key, on_progress=on_progress, diagnostics=search_diag)
-        progress_state["cur"] = progress_state["total"]
-        progress_state["found"] = len(groups)
-        live.update(make_panel())
+    search_fail: str | None = None
+    try:
+        with Live(make_panel(), refresh_per_second=4, console=console, transient=True) as live:
+            live_ref.append(live)
+            groups = await search_groups(api_key, on_progress=on_progress, diagnostics=search_diag)
+            progress_state["cur"] = progress_state["total"]
+            progress_state["found"] = len(groups)
+            live.update(make_panel())
+    except Exception as e:
+        groups = []
+        search_fail = str(e)
 
     out_path = Path("output") / "found_groups.json"
     out_path.parent.mkdir(exist_ok=True)
@@ -383,7 +388,7 @@ async def _run_search() -> None:
     out_path.write_text(json.dumps(groups, ensure_ascii=False, indent=2), encoding="utf-8")
     console.print(f"\n[green]Найдено групп: {len(groups)}[/]")
     console.print("  [dim](после сбора: вейп-фильтр по keywords/exclude_keywords)[/]")
-    if not groups and search_diag:
+    if not groups:
         raw = search_diag.get("raw", 0)
         av = search_diag.get("after_vape", 0)
         fin = search_diag.get("final", 0)
@@ -391,7 +396,25 @@ async def _run_search() -> None:
         th = search_diag.get("themes_count")
         nresp = search_diag.get("responses_with_groups", 0)
         err = search_diag.get("first_error")
+        finished = search_diag.get("search_finished", False)
+        diag_path = Path("output") / "last_search_diagnostics.json"
+        try:
+            dump = {**search_diag, "menu_search_exception": search_fail}
+            diag_path.write_text(json.dumps(dump, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            diag_path = None
         console.print("\n[bold yellow]Диагностика (почему 0):[/]")
+        if search_fail:
+            console.print(f"  [red]•[/] Исключение: [bold]{escape(search_fail)}[/]")
+        elif not finished and not search_diag:
+            console.print(
+                "  [yellow]•[/] Метрики не собраны (пустой diagnostics — возможно старая версия кода "
+                "или сбой до входа в search_groups)."
+            )
+        elif not finished:
+            console.print(
+                "  [yellow]•[/] Поиск не дошёл до конца ([bold]search_finished: false[/])."
+            )
         if cc is not None and cc == 0:
             console.print(
                 "  [red]•[/] В запросах [bold]0 городов[/] "
@@ -404,7 +427,7 @@ async def _run_search() -> None:
         )
         if th is not None and cc is not None:
             console.print(f"  [dim]•[/] Тем: {th}, городов в запросах: {cc}")
-        if raw == 0:
+        if raw == 0 and finished:
             console.print(
                 "  [dim]Подсказка:[/] источники ничего не вернули — часто виноваты "
                 "[bold]прокси[/] (блок/таймаут), пустой ответ tg-cat/ddgs, нет ключей API. "
@@ -423,6 +446,8 @@ async def _run_search() -> None:
             )
         if err:
             console.print(f"  [red]Первая ошибка запроса:[/] {escape(str(err))}")
+        if diag_path and diag_path.is_file():
+            console.print(f"  [dim]Полный дамп:[/] [cyan]{diag_path}[/]")
     from collections import Counter
     by_source = Counter(g.get("source", "?") for g in groups)
     for src, cnt in by_source.most_common():

@@ -412,6 +412,22 @@ async def search_groups(
     Если передать diagnostics: dict, после поиска в нём будут ключи raw, after_vape, final,
     responses_with_groups, first_error, cities_query_count, themes_count (для отладки нулевой выдачи).
     """
+    if diagnostics is not None:
+        fe = diagnostics.get("first_error")
+        diagnostics.update(
+            {
+                "raw": 0,
+                "after_vape": 0,
+                "final": 0,
+                "cities_query_count": 0,
+                "themes_count": 0,
+                "responses_with_groups": 0,
+                "search_finished": False,
+            }
+        )
+        if fe:
+            diagnostics["first_error"] = fe
+
     all_groups: dict[str, dict] = {}
     pool = proxy_pool or ProxyPool()
     settings = Settings()
@@ -561,7 +577,7 @@ async def search_groups(
         async def _search_catalog(q: str, proxy: str | None):
             return await search_tg_catalog(q, proxy=proxy)
 
-        await _run_with_progress("TG Catalog", catalog_queries, _search_catalog)
+        await _run_with_progress("TG Catalog", catalog_queries, _search_catalog, diagnostics)
 
     # DuckDuckGo — site:t.me + только тема × город (без отдельных запросов только по теме)
     if ddgs_enabled:
@@ -581,4 +597,5 @@ async def search_groups(
         diagnostics["raw"] = len(groups_list)
         diagnostics["after_vape"] = len(vape_filtered)
         diagnostics["final"] = len(filtered)
+        diagnostics["search_finished"] = True
     return filtered
