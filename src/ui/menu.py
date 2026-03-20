@@ -188,8 +188,11 @@ def _render_main_menu() -> str:
     console.print(f"{_mi('1')} Поиск групп")
     console.print(f"{_mi('2')} Сбор базы пользователей")
     console.print(f"{_mi('7')} Просмотр найденных групп")
-    console.print(f"{_mi('9')} Очистить список найденных групп")
     console.print(f"{_mi('6')} Статистика базы")
+    console.print(
+        "[bold yellow] 9[/]  [bold]Очистить[/] список найденных групп "
+        "([dim]output/found_groups.json[/])"
+    )
     console.print()
     console.print("[bold]Действия в Telegram[/]")
     console.print(f"{_mi('3')} Вступить в группы")
@@ -198,6 +201,9 @@ def _render_main_menu() -> str:
     console.print()
     console.print(f"{_mi('8')} Прокси, сессии и аккаунты…")
     console.print(f"{_mi('0')} Выход")
+    console.print(
+        "[dim]Ввод: 0–9. Очистка результатов поиска — всегда [bold]9[/].[/]"
+    )
     console.print()
     return Prompt.ask(
         "Выберите действие",
@@ -713,6 +719,13 @@ def _run_view_groups() -> None:
         table.add_row(str(i), g.get("source", "?"), link, title)
     console.print(table)
     console.print(f"[dim]Всего групп: {len(groups)}. Файл: {found_path}[/]")
+    console.print(
+        "[dim]Очистить весь файл — [bold]главное меню → 9[/] или подтвердите ниже.[/]"
+    )
+    if Confirm.ask("Очистить found_groups.json (все записи)?", default=False):
+        found_path.parent.mkdir(parents=True, exist_ok=True)
+        found_path.write_text("[]\n", encoding="utf-8")
+        console.print("[green]Список найденных групп очищен.[/]")
     Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
 
 
