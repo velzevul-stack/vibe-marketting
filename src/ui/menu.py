@@ -344,7 +344,7 @@ async def _run_join_groups() -> None:
         ]
         await _log_line("  " + " · ".join(dist_parts))
         await _log_line(
-            f"[dim]Шаг 2:[/] параллельный запуск — у каждого аккаунта своя очередь вступлений "
+            f"[dim]Шаг 2:[/] [dim]параллельный запуск — у каждого аккаунта своя очередь вступлений "
             f"([bold]по очереди[/] внутри аккаунта, между ними пауза {sett.delay_join_min}–{sett.delay_join_max} с).[/]"
         )
 
@@ -374,11 +374,11 @@ async def _run_join_groups() -> None:
                 if ok:
                     ok_local += 1
                     await _log_line(
-                        f"    [green]✓ OK[/] [dim]{escape(str(sn))}[/] — {escape(str(title))}[/]"
+                        f"    [green]✓ OK[/] [dim]{escape(str(sn))} — {escape(str(title))}[/]"
                     )
                 else:
                     await _log_line(
-                        f"    [red]✗ FAIL[/] [dim]{escape(str(sn))}[/] — {escape(str(title))}[/]"
+                        f"    [red]✗ FAIL[/] [dim]{escape(str(sn))} — {escape(str(title))}[/]"
                     )
                     if fail_reason:
                         await _log_line(f"      [dim]{escape(fail_reason)}[/]")
