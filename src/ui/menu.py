@@ -214,6 +214,12 @@ async def _run_join_groups() -> None:
     groups = groups[:count]
     mgr = InviteManager()
     sett = mgr.settings
+    n_acc = len(mgr.pool.accounts)
+    console.print(
+        f"[dim]Аккаунтов: {n_acc}. "
+        f"Распределение: least-used (меньше действий сегодня → приоритет). "
+        f"Пауза между вступлениями: {sett.delay_join_min}–{sett.delay_join_max} сек (случайно).[/]\n"
+    )
     ok_count = 0
     for i, g in enumerate(groups):
         link = g.get("link") or g.get("id", "")
@@ -222,15 +228,17 @@ async def _run_join_groups() -> None:
         title = g.get("title", "?")
         console.print(f"  [{i+1}/{len(groups)}] {title}...")
         try:
-            ok = await mgr.join_group(link)
+            ok, session = await mgr.join_group(link)
+            who = session or "—"
             if ok:
                 ok_count += 1
-                console.print(f"    [green]OK[/]")
+                console.print(f"    [green]OK[/] [dim](аккаунт: {who})[/]")
             else:
-                console.print(f"    [red]FAIL[/]")
+                console.print(f"    [red]FAIL[/] [dim](аккаунт: {who})[/]")
         except Exception as e:
             console.print(f"    [red]Ошибка: {e}[/]")
         delay = max(1, random.uniform(sett.delay_join_min, sett.delay_join_max))
+        console.print(f"    [dim]пауза {delay:.0f} сек…[/]")
         await asyncio.sleep(delay)
     console.print(f"\n[bold green]Вступили в {ok_count} из {len(groups)} групп[/]")
     Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")

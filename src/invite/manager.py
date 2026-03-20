@@ -156,18 +156,22 @@ class InviteManager:
         finally:
             await client.disconnect()
 
-    async def join_group(self, link: str) -> bool:
-        """Вступить в группу/канал по ссылке. Поддержка публичных и приватных (joinchat)."""
+    async def join_group(self, link: str) -> tuple[bool, str | None]:
+        """
+        Вступить в группу/канал по ссылке. Публичные и приватные (joinchat).
+        Возвращает (успех, session_name выбранного аккаунта).
+        """
         state = self.pool.get_best_account()
         if not state:
-            return False
+            return False, None
         client = self.pool.get_client(state.session_name)
         if not client:
-            return False
+            return False, state.session_name
+        session_name = state.session_name
         try:
             await client.connect()
             if not await client.is_user_authorized():
-                return False
+                return False, session_name
             link = (link or "").strip()
             if "joinchat/" in link.lower():
                 match = re.search(r"joinchat/([a-zA-Z0-9_-]+)", link, re.I)
@@ -175,18 +179,18 @@ class InviteManager:
                     hash_part = match.group(1)
                     await client(ImportChatInviteRequest(hash_part))
                 else:
-                    return False
+                    return False, session_name
             else:
                 entity = await client.get_entity(link)
                 await client(JoinChannelRequest(entity))
-            self.pool.mark_used(state.session_name)
-            return True
+            self.pool.mark_used(session_name)
+            return True, session_name
         except FloodWaitError as e:
-            self.pool.mark_flood_wait(state.session_name, e.seconds)
+            self.pool.mark_flood_wait(session_name, e.seconds)
             await asyncio.sleep(e.seconds)
             return await self.join_group(link)
         except Exception:
-            return False
+            return False, session_name
         finally:
             await client.disconnect()
 
