@@ -18,6 +18,27 @@ if sys.platform == "win32":
 from src.ui.menu import run_menu
 
 
+def _run_startup_session_sync() -> None:
+    from rich.console import Console
+    from src.config import Settings
+    from src.session_sync import sync_sessions_dir_to_accounts
+
+    s = Settings()
+    if not s.sync_sessions_on_startup:
+        return
+    con = Console()
+    try:
+        n_add, warns = sync_sessions_dir_to_accounts(s)
+        if n_add:
+            con.print(
+                f"[dim]sync_sessions:[/] [green]+{n_add}[/] аккаунт(ов) → accounts.json"
+            )
+        for w in warns[:8]:
+            con.print(f"[dim]sync_sessions:[/] [yellow]{w}[/]")
+    except Exception as e:
+        con.print(f"[red]sync_sessions: {e}[/]")
+
+
 def _cli_assign_proxies_only() -> int:
     """Только перезаписать proxy в accounts.json из пула (без меню)."""
     from rich.console import Console
@@ -59,6 +80,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     if args.assign_proxies:
+        _run_startup_session_sync()
         raise SystemExit(_cli_assign_proxies_only())
     run_menu()
 

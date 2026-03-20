@@ -26,6 +26,7 @@ from src.verify.proxy_checker import check_proxies
 from src.invite import InviteManager, AccountPool
 from src.telethon_session_menu import run_telethon_session_menu
 from src.accounts_bulk_prepare import run_bulk_account_prepare
+from src.session_sync import sync_sessions_dir_to_accounts
 
 console = Console()
 
@@ -496,6 +497,22 @@ def _run_view_groups() -> None:
 def run_menu() -> None:
     """Запуск главного меню."""
     _sett = Settings()
+    if _sett.sync_sessions_on_startup:
+        try:
+            n_add, warns = sync_sessions_dir_to_accounts(_sett)
+            if n_add:
+                console.print(
+                    f"[dim]sync_sessions_on_startup:[/] [green]+{n_add}[/] "
+                    f"аккаунт(ов) → accounts.json (из папки сессий + .json)"
+                )
+            for w in warns[:12]:
+                console.print(f"[dim]sync_sessions:[/] [yellow]{w}[/]")
+            if len(warns) > 12:
+                console.print(f"[dim]… ещё предупреждений: {len(warns) - 12}[/]")
+        except Exception as e:
+            console.print(f"[red]sync_sessions_on_startup: {e}[/]")
+        console.print()
+
     if _sett.assign_proxies_on_startup:
         ok, msg = assign_proxies_round_robin_to_accounts()
         if ok:

@@ -12,6 +12,7 @@
   "bulk_2fa_password": "",
   "bulk_prepare_delay_sec": 5,
   "assign_proxies_on_startup": false,
+  "sync_sessions_on_startup": true,
 
   "telethon_default_api": {
     "_comment": "Для автопривязки .session (меню сессий → 4): общий api_id/api_hash с my.telegram.org",

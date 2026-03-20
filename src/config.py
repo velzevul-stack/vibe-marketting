@@ -43,6 +43,10 @@ class Settings:
         self.bulk_prepare_delay_sec: float = float(
             self._data.get("bulk_prepare_delay_sec", 5.0)
         )
+        # True: при каждом запуске — подтянуть *.session + рядом *.json → accounts.json
+        self.sync_sessions_on_startup: bool = bool(
+            self._data.get("sync_sessions_on_startup", True)
+        )
         # True: при каждом запуске меню сначала round-robin прокси из пула → accounts.json
         self.assign_proxies_on_startup: bool = bool(
             self._data.get("assign_proxies_on_startup", False)
