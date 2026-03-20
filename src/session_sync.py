@@ -17,9 +17,12 @@ from src.config import (
 
 def _pick_api_from_dict(d: dict) -> tuple[int | None, str | None]:
     """Вытащить api_id + api_hash из плоского или вложенного dict."""
+    # Telegram Desktop / экспорты часто: app_id + app_hash (как у сессии рядом)
     pairs = [
-        ("api_id", "api_hash"),
         ("app_id", "app_hash"),
+        ("api_id", "api_hash"),
+        ("app_id", "api_hash"),
+        ("api_id", "app_hash"),
         ("apiId", "apiHash"),
     ]
     for ik, hk in pairs:
@@ -40,25 +43,33 @@ def _pick_api_from_dict(d: dict) -> tuple[int | None, str | None]:
     return None, None
 
 
-def _read_sidecar_session_json(session_dir: Path, stem: str) -> tuple[int | None, str | None, str | None]:
+def _read_sidecar_session_json(
+    session_dir: Path, stem: str
+) -> tuple[int | None, str | None, str | None, str | None]:
     """
-    Читает sessions/<stem>.json → (api_id, api_hash, phone).
-    phone — опционально (phone, phone_number).
+    Читает <stem>.json рядом с .session → (api_id, api_hash, phone, ошибка_парсинга).
+    ошибка_парсинга — если файл есть, но JSON битый/пустой.
     """
     path = session_dir / f"{stem}.json"
     if not path.is_file():
-        return None, None, None
+        return None, None, None, None
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None, None, None
+        raw = path.read_text(encoding="utf-8-sig").strip()
+    except OSError as e:
+        return None, None, None, f"{stem}.json: не прочитать ({e})"
+    if not raw:
+        return None, None, None, f"{stem}.json пустой"
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        return None, None, None, f"{stem}.json: невалидный JSON ({e.msg})"
     if not isinstance(data, dict):
-        return None, None, None
+        return None, None, None, f"{stem}.json: ожидался объект {{}}, не список/строка"
     aid, ahash = _pick_api_from_dict(data)
     phone = data.get("phone") or data.get("phone_number")
     if phone is not None:
         phone = str(phone).strip() or None
-    return aid, ahash, phone
+    return aid, ahash, phone, None
 
 
 def sync_sessions_dir_to_accounts(settings: Settings | None = None) -> tuple[int, list[str]]:
@@ -89,13 +100,15 @@ def sync_sessions_dir_to_accounts(settings: Settings | None = None) -> tuple[int
         if stem in in_json:
             continue
 
-        aid, ahash, phone = _read_sidecar_session_json(session_dir, stem)
+        aid, ahash, phone, sidecar_err = _read_sidecar_session_json(session_dir, stem)
+        if sidecar_err:
+            warns.append(sidecar_err)
         if aid is None or not ahash:
             aid = s.default_telethon_api_id
             ahash = s.default_telethon_api_hash
         if aid is None or not ahash:
             warns.append(
-                f"{stem}: нет api в {stem}.json и пустой telethon_default_api в settings"
+                f"{stem}: нет app_id/app_hash (или api_*) в {stem}.json и пустой telethon_default_api в settings"
             )
             continue
 
