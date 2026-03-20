@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from telethon import TelegramClient
-from telethon.errors import FloodWaitError
+from telethon.errors import FloodWaitError, UserAlreadyParticipantError
 from telethon.tl.functions.contacts import AddContactRequest, GetContactsRequest
 from telethon.tl.functions.channels import InviteToChannelRequest, JoinChannelRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest
@@ -136,6 +136,14 @@ def smart_delay(min_sec: int, max_sec: int) -> float:
     return max(1, base + jitter)
 
 
+def _join_error_message(exc: BaseException) -> str:
+    """Краткое сообщение об ошибке Telethon для лога/консоли."""
+    name = type(exc).__name__
+    msg = str(exc).strip() or name
+    text = f"{name}: {msg}"
+    return text if len(text) <= 280 else text[:277] + "..."
+
+
 class InviteManager:
     """Управление приглашениями с умным распределением."""
 
@@ -173,28 +181,39 @@ class InviteManager:
         finally:
             await client.disconnect()
 
-    async def join_group(self, link: str) -> tuple[bool, str | None]:
+    async def join_group(self, link: str) -> tuple[bool, str | None, str]:
         """
         Вступить в группу (аккаунт — least-used).
-        Возвращает (успех, session_name).
+        Возвращает (успех, session_name, причина_ошибки — пустая строка при успехе).
         """
         state = self.pool.get_best_account()
         if not state:
-            return False, None
+            return False, None, "Нет доступного аккаунта (все в FloodWait или пул пуст)"
         return await self.join_group_with_session(link, state.session_name)
 
-    async def join_group_with_session(self, link: str, session_name: str) -> tuple[bool, str | None]:
+    async def join_group_with_session(
+        self, link: str, session_name: str
+    ) -> tuple[bool, str | None, str]:
         """
         Вступить в группу с указанного аккаунта (для параллельных воркеров).
         Публичные ссылки и joinchat.
+        Возвращает (успех, session_name, причина_ошибки — пустая строка при успехе).
         """
         client = self.pool.get_client(session_name)
         if not client:
-            return False, session_name
+            return (
+                False,
+                session_name,
+                "Нет клиента: проверьте api_id, api_hash и session_name в accounts.json",
+            )
         try:
             await client.connect()
             if not await client.is_user_authorized():
-                return False, session_name
+                return (
+                    False,
+                    session_name,
+                    "Сессия не авторизована — войдите через меню «Сессии Telethon»",
+                )
             link = (link or "").strip()
             if "joinchat/" in link.lower():
                 match = re.search(r"joinchat/([a-zA-Z0-9_-]+)", link, re.I)
@@ -202,18 +221,21 @@ class InviteManager:
                     hash_part = match.group(1)
                     await client(ImportChatInviteRequest(hash_part))
                 else:
-                    return False, session_name
+                    return False, session_name, "Некорректная ссылка joinchat/…"
             else:
                 entity = await client.get_entity(link)
                 await client(JoinChannelRequest(entity))
             self.pool.mark_used(session_name)
-            return True, session_name
+            return True, session_name, ""
+        except UserAlreadyParticipantError:
+            self.pool.mark_used(session_name)
+            return True, session_name, ""
         except FloodWaitError as e:
             self.pool.mark_flood_wait(session_name, e.seconds)
             await asyncio.sleep(e.seconds)
             return await self.join_group_with_session(link, session_name)
-        except Exception:
-            return False, session_name
+        except Exception as e:
+            return False, session_name, _join_error_message(e)
         finally:
             await client.disconnect()
 

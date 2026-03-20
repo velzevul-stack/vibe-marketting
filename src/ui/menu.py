@@ -329,7 +329,7 @@ async def _run_join_groups() -> None:
                     continue
                 title = (g.get("title") or "?")[:55]
                 try:
-                    ok, _used = await mgr.join_group_with_session(link, sn)
+                    ok, _used, fail_reason = await mgr.join_group_with_session(link, sn)
                 except Exception as e:
                     console.print(f"  [red]{escape(str(sn))}[/] {escape(str(title))}… [red]{escape(str(e))}[/]")
                     fails_local.append((g, tried | {sn}))
@@ -340,6 +340,8 @@ async def _run_join_groups() -> None:
                     console.print(f"  [green]OK[/] [dim]{escape(str(sn))} — {escape(str(title))}[/]")
                 else:
                     console.print(f"  [red]FAIL[/] [dim]{escape(str(sn))} — {escape(str(title))}[/]")
+                    if fail_reason:
+                        console.print(f"      [dim]{escape(fail_reason)}[/]")
                     fails_local.append((g, tried | {sn}))
                 await asyncio.sleep(max(1, random.uniform(sett.delay_join_min, sett.delay_join_max)))
             return fails_local, ok_local
