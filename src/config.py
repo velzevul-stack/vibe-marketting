@@ -47,6 +47,18 @@ class Settings:
         self.assign_proxies_on_startup: bool = bool(
             self._data.get("assign_proxies_on_startup", False)
         )
+        # Дефолтные api для автопривязки .session → accounts.json (меню сессий, п.4)
+        tda = self._data.get("telethon_default_api") or {}
+        self.default_telethon_api_id: int | None = None
+        try:
+            if tda.get("api_id") is not None and str(tda.get("api_id", "")).strip() != "":
+                self.default_telethon_api_id = int(tda["api_id"])
+        except (TypeError, ValueError):
+            pass
+        _h = tda.get("api_hash")
+        self.default_telethon_api_hash: str | None = (
+            str(_h).strip() if _h and str(_h).strip() else None
+        )
 
 
 # Если bulk_2fa_password в settings пустой — автоподстановка при 2FA в консоли
@@ -289,3 +301,98 @@ def load_accounts() -> list[dict]:
         and a.get("api_hash")
         and not a.get("_template")
     ]
+
+
+def is_telethon_account_row(row: dict) -> bool:
+    """Строка в accounts.json — полноценный TG-аккаунт (не шаблон)."""
+    return bool(
+        row.get("api_id")
+        and row.get("api_hash")
+        and not row.get("_template")
+    )
+
+
+def upsert_telethon_account(
+    session_name: str,
+    api_id: int,
+    api_hash: str,
+    *,
+    phone: str | None = None,
+    proxy: str | None = None,
+) -> None:
+    """Добавить или заменить аккаунт по session_name (сохраняет прочие строки JSON)."""
+    name = (session_name or "").strip()
+    if not name:
+        raise ValueError("session_name пустой")
+    rows = load_accounts_all()
+    rows = [
+        r
+        for r in rows
+        if not (is_telethon_account_row(r) and r.get("session_name") == name)
+    ]
+    entry: dict = {
+        "session_name": name,
+        "api_id": int(api_id),
+        "api_hash": str(api_hash).strip(),
+    }
+    if phone and str(phone).strip():
+        entry["phone"] = str(phone).strip()
+    if proxy and str(proxy).strip():
+        entry["proxy"] = str(proxy).strip()
+    rows.append(entry)
+    save_accounts_all(rows)
+
+
+def session_bind_file_path() -> Path:
+    """Список сессий для привязки (как proxies.txt)."""
+    return _config_dir() / "session_bind.txt"
+
+
+def parse_session_bind_line(line: str) -> dict | None:
+    """
+    Одна строка session_bind.txt:
+
+    - только session_name — api возьмутся из telethon_default_api в settings
+    - session_name:api_id:api_hash
+    - session_name:api_id:api_hash:phone
+    """
+    line = (line or "").strip()
+    if not line or line.startswith("#"):
+        return None
+    if ":" not in line:
+        return {
+            "session_name": line,
+            "api_id": None,
+            "api_hash": None,
+            "phone": None,
+        }
+    parts = line.split(":", 3)
+    if len(parts) < 3:
+        return None
+    name, aid_s, ahash = parts[0].strip(), parts[1].strip(), parts[2].strip()
+    phone = parts[3].strip() if len(parts) > 3 else None
+    try:
+        api_id = int(aid_s)
+    except ValueError:
+        return None
+    if not name or not ahash:
+        return None
+    return {
+        "session_name": name,
+        "api_id": api_id,
+        "api_hash": ahash,
+        "phone": phone or None,
+    }
+
+
+def load_session_bind_specs_from_file() -> list[dict]:
+    """Разобрать config/session_bind.txt."""
+    path = session_bind_file_path()
+    if not path.exists():
+        return []
+    out: list[dict] = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        spec = parse_session_bind_line(raw)
+        if spec:
+            out.append(spec)
+    return out

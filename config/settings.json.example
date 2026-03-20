@@ -7,11 +7,17 @@
   "ddgs_search_enabled": true,
   "tg_catalog_enabled": true,
 
-  "telethon_session_dir": "accounts",
+  "telethon_session_dir": "sessions",
   "_bulk_2fa_comment": "Пустая строка = пароль 2FA из кода (AUTO_2FA_PASSWORD_DEFAULT). Иначе свой.",
   "bulk_2fa_password": "",
   "bulk_prepare_delay_sec": 5,
   "assign_proxies_on_startup": false,
+
+  "telethon_default_api": {
+    "_comment": "Для автопривязки .session (меню сессий → 4): общий api_id/api_hash с my.telegram.org",
+    "api_id": null,
+    "api_hash": ""
+  },
 
   "proxies": {
     "source": "files",

@@ -6,13 +6,20 @@ from rich.prompt import Prompt, Confirm
 from rich.table import Table
 
 from src.config import (
+    Settings,
     accounts_json_path,
     effective_2fa_password,
     load_accounts,
-    load_accounts_all,
-    save_accounts_all,
+    load_session_bind_specs_from_file,
+    session_bind_file_path,
     telethon_session_dir_path,
+    upsert_telethon_account,
 )
+
+
+def _session_dir_label() -> str:
+    return str(telethon_session_dir_path()).replace("\\", "/")
+
 
 def _sessions_dir() -> Path:
     return telethon_session_dir_path()
@@ -25,14 +32,6 @@ def _session_paths() -> list[Path]:
     return sorted(d.glob("*.session"))
 
 
-def _is_telethon_account(row: dict) -> bool:
-    return bool(
-        row.get("api_id")
-        and row.get("api_hash")
-        and not row.get("_template")
-    )
-
-
 def _append_account(
     session_name: str,
     api_id: int,
@@ -40,34 +39,25 @@ def _append_account(
     phone: str | None = None,
     proxy: str | None = None,
 ) -> None:
-    rows = load_accounts_all()
-    # убрать старую запись с тем же session_name
-    rows = [r for r in rows if not (_is_telethon_account(r) and r.get("session_name") == session_name)]
-    entry: dict = {
-        "session_name": session_name,
-        "api_id": api_id,
-        "api_hash": api_hash.strip(),
-    }
-    if phone:
-        entry["phone"] = phone.strip()
-    if proxy and proxy.strip():
-        entry["proxy"] = proxy.strip()
-    rows.append(entry)
-    save_accounts_all(rows)
+    upsert_telethon_account(
+        session_name, api_id, api_hash, phone=phone, proxy=proxy
+    )
 
 
 async def _list_sessions_console(console) -> None:
     files = {p.stem for p in _session_paths()}
     accs = load_accounts()
+    dlabel = _session_dir_label()
+
     table = Table(title="Сессии Telethon")
     table.add_column("session_name", style="cyan")
-    table.add_column("Файл sessions/*.session", style="green")
+    table.add_column(f".session в {dlabel}", style="green")
     table.add_column("В accounts.json", style="yellow")
     table.add_column("phone", style="dim")
     names = sorted(files | {a.get("session_name", "") for a in accs if a.get("session_name")})
     names = [n for n in names if n]
     if not names:
-        console.print("[yellow]Нет .session в sessions/ и нет аккаунтов в accounts.json[/]")
+        console.print(f"[yellow]Нет .session в {dlabel} и нет аккаунтов в accounts.json[/]")
         return
     by_name = {a.get("session_name"): a for a in accs}
     for name in names:
@@ -77,15 +67,16 @@ async def _list_sessions_console(console) -> None:
         table.add_row(name, has_file, in_json, str(phone))
     console.print(table)
     console.print(
-        "[dim]Telethon ищет файл sessions/<session_name>.session. "
-        "В accounts.json нужны api_id и api_hash с https://my.telegram.org "
-        "(те же, что при создании сессии).[/]"
+        f"[dim]Файлы лежат в [cyan]{dlabel}[/]. "
+        "Назначение прокси (меню 8→1) затрагивает только строки в accounts.json — "
+        "сначала привяжите .session через п.2 или п.3. "
+        "Нужны api_id и api_hash с https://my.telegram.org.[/]"
     )
 
 
 async def _bind_session_console(console) -> None:
     raw = Prompt.ask(
-        "Путь к .session или имя без расширения (если файл уже в sessions/)",
+        f"Путь к .session или имя без расширения (если файл уже в {_session_dir_label()}/)",
     ).strip()
     if not raw:
         return
@@ -102,7 +93,9 @@ async def _bind_session_console(console) -> None:
         session_name = Path(raw).stem
         dest = _sessions_dir() / f"{session_name}.session"
         if not dest.is_file():
-            console.print(f"[red]Нет файла {dest}. Положите .session в папку sessions/ или укажите полный путь.[/]")
+            console.print(
+                f"[red]Нет файла {dest}. Положите .session в {_session_dir_label()}/ или укажите полный путь.[/]"
+            )
             return
 
     api_id_s = Prompt.ask("api_id (число с my.telegram.org)").strip()
@@ -180,16 +173,133 @@ async def _new_login_console(console) -> None:
         console.print(f"[green]Сохранено в {accounts_json_path()}[/]")
 
 
+def _ask_api_id_hash_or_defaults(console, settings: Settings) -> tuple[int, str] | None:
+    """api_id + api_hash из settings или один запрос в консоль."""
+    aid = settings.default_telethon_api_id
+    hsh = settings.default_telethon_api_hash
+    if aid is not None and hsh:
+        console.print(f"[dim]В settings.json (telethon_default_api): api_id={aid}[/]")
+        if Confirm.ask("Использовать этот api_id и api_hash?", default=True):
+            return aid, hsh
+    console.print(
+        "[dim]Можно задать постоянно в settings.json → telethon_default_api "
+        "(см. settings.json.example).[/]"
+    )
+    try:
+        aid = int(Prompt.ask("api_id (my.telegram.org)").strip())
+    except ValueError:
+        console.print("[red]Некорректный api_id[/]")
+        return None
+    hsh = Prompt.ask("api_hash").strip()
+    if not hsh:
+        console.print("[red]Пустой api_hash[/]")
+        return None
+    return aid, hsh
+
+
+async def _auto_bind_sessions_console(console) -> None:
+    """Массовая запись в accounts.json: из папки сессий или из session_bind.txt."""
+    settings = Settings()
+    dlabel = _session_dir_label()
+    bind_path = session_bind_file_path()
+
+    console.print("\n[bold]Автопривязка в accounts.json[/]")
+    console.print(
+        f"[[1]] Все .session в [cyan]{dlabel}[/], которых ещё нет в accounts.json (один api для всех)\n"
+        f"[[2]] Список из [cyan]{bind_path}[/] (как proxies.txt: имя или имя:api_id:api_hash:телефон)\n"
+        "[[0]] Отмена"
+    )
+    mode = Prompt.ask("Режим", choices=["0", "1", "2"], default="0")
+    if mode == "0":
+        return
+
+    stems = {p.stem for p in _session_paths()}
+    in_json = {
+        a.get("session_name")
+        for a in load_accounts()
+        if a.get("session_name")
+    }
+
+    if mode == "1":
+        missing = sorted(stems - in_json)
+        if not missing:
+            console.print(
+                "[yellow]Нечего добавлять: для каждого .session уже есть запись в accounts.json "
+                "или в папке нет .session.[/]"
+            )
+            return
+        preview = ", ".join(missing[:15])
+        if len(missing) > 15:
+            preview += f" … (+{len(missing) - 15})"
+        console.print(f"[dim]Будет добавлено аккаунтов: {len(missing)} — {preview}[/]")
+        pair = _ask_api_id_hash_or_defaults(console, settings)
+        if not pair:
+            return
+        aid, ahash = pair
+        if not Confirm.ask("Записать в accounts.json?", default=True):
+            return
+        for name in missing:
+            upsert_telethon_account(name, aid, ahash)
+        console.print(f"[green]Готово: {accounts_json_path()}[/]")
+        return
+
+    # mode == 2 — файл
+    specs = load_session_bind_specs_from_file()
+    if not specs:
+        console.print(
+            f"[red]Файл пуст или отсутствует: {bind_path}[/]\n"
+            f"[dim]Скопируйте config/session_bind.txt.example → session_bind.txt и заполните.[/]"
+        )
+        return
+
+    errs: list[str] = []
+    to_apply: list[tuple[str, int, str, str | None]] = []
+    for spec in specs:
+        name = spec["session_name"]
+        aid = spec["api_id"]
+        ahash = spec["api_hash"]
+        phone = spec.get("phone")
+        if aid is None or not ahash:
+            aid = settings.default_telethon_api_id
+            ahash = settings.default_telethon_api_hash
+        if aid is None or not ahash:
+            errs.append(f"{name}: нет api_id/api_hash (в строке или telethon_default_api)")
+            continue
+        to_apply.append((name, int(aid), str(ahash), phone))
+
+    if errs:
+        for e in errs:
+            console.print(f"  [red]{e}[/]")
+    if not to_apply:
+        console.print("[red]Нечего записать (исправьте ошибки выше).[/]")
+        return
+
+    console.print(f"[dim]Записей к применению: {len(to_apply)} (файл {bind_path})[/]")
+    for name, _, _, _ in to_apply[:8]:
+        has_f = "да" if name in stems else "нет .session (строка всё равно будет в JSON)"
+        console.print(f"  • {name}  (файл: {has_f})")
+    if len(to_apply) > 8:
+        console.print(f"  … ещё {len(to_apply) - 8}")
+
+    if not Confirm.ask("Обновить accounts.json?", default=True):
+        return
+
+    for name, aid, ahash, phone in to_apply:
+        upsert_telethon_account(name, aid, ahash, phone=phone)
+    console.print(f"[green]Готово: {accounts_json_path()}[/]")
+
+
 async def run_telethon_session_menu(console) -> None:
     """Подменю: список / привязать .session / новая авторизация."""
     while True:
         console.print()
         console.print("[bold cyan]Сессии Telethon (.session)[/]")
-        console.print("[1] Список: файлы в sessions/ и accounts.json")
-        console.print("[2] Привязать готовый .session (скопировать + запись в accounts.json)")
-        console.print("[3] Новая авторизация по телефону (создать .session)")
-        console.print("[0] Назад в главное меню")
-        sub = Prompt.ask("Выбор", choices=["0", "1", "2", "3"], default="0")
+        console.print(f"[[1]] Список: файлы в {_session_dir_label()}/ и accounts.json")
+        console.print("[[2]] Привязать готовый .session (скопировать + запись в accounts.json)")
+        console.print("[[3]] Новая авторизация по телефону (создать .session)")
+        console.print("[[4]] Автопривязка: папка с .session или config/session_bind.txt")
+        console.print("[[0]] Назад в главное меню")
+        sub = Prompt.ask("Выбор", choices=["0", "1", "2", "3", "4"], default="0")
         if sub == "0":
             break
         if sub == "1":
@@ -198,4 +308,6 @@ async def run_telethon_session_menu(console) -> None:
             await _bind_session_console(console)
         elif sub == "3":
             await _new_login_console(console)
+        elif sub == "4":
+            await _auto_bind_sessions_console(console)
         Prompt.ask("\n[dim]Enter — продолжить[/]", default="")

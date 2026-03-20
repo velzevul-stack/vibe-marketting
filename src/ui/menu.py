@@ -408,7 +408,13 @@ def _run_assign_proxies() -> None:
     if not proxies:
         console.print("[red]Нет прокси. Добавьте в config/proxies.txt или settings.json[/]")
         return
-    if not Confirm.ask(f"Назначить {len(proxies)} прокси для {len(accounts)} аккаунтов?"):
+    console.print(
+        f"[dim]В пуле прокси: {len(proxies)} шт. Учитываются только аккаунты из accounts.json: {len(accounts)} шт. "
+        f"(файлы .session без записи в JSON сюда не входят.)[/]"
+    )
+    if not Confirm.ask(
+        "Назначить каждому аккаунту один прокси по round-robin (1-й акк → 1-й прокси, 2-й → 2-й, …)?"
+    ):
         return
     ok, msg = assign_proxies_round_robin_to_accounts()
     if ok:

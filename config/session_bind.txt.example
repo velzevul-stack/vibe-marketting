@@ -1,0 +1,15 @@
+# Скопируйте в session_bind.txt (рядом в config/).
+# Строки с # игнорируются.
+#
+# Только имя сессии (= имя файла без .session) — тогда api_id и api_hash
+# берутся из settings.json → telethon_default_api
+#
+# 223110241
+# 223110254
+#
+# Или полная строка (приоритетнее дефолта из settings):
+# session_name:api_id:api_hash
+# session_name:api_id:api_hash:+375291234567
+
+223110241
+223110254
