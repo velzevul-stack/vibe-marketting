@@ -1,5 +1,6 @@
 """Конфигурация приложения."""
 import json
+import re
 from pathlib import Path
 from urllib.parse import quote, unquote, urlparse
 
@@ -34,6 +35,15 @@ class Settings:
         self.telegram_index_api_key: str | None = self._data.get("telegram_index_api_key") or None
         self.ddgs_search_enabled: bool = self._data.get("ddgs_search_enabled", True)
         self.tg_catalog_enabled: bool = self._data.get("tg_catalog_enabled", True)
+        # Не строить запросы по городам из blocklist и отбрасывать такие группы в выдаче (см. data/russian_cities_blocklist.json)
+        self.exclude_russian_cities_in_search: bool = bool(
+            self._data.get("exclude_russian_cities_in_search", True)
+        )
+        # Файл со списком ссылок на группы (в config/), по одной t.me на строку — для п.2/3 без поиска
+        _glf = self._data.get("group_links_file")
+        self.group_links_file: str = (
+            str(_glf).strip() if _glf and str(_glf).strip() else "group_links.txt"
+        )
         self.tgstat_token: str | None = self._data.get("tgstat_token") or None
         self.telemetr_api_key: str | None = self._data.get("telemetr_api_key") or None
         # Папка с *.session (относительно корня проекта / cwd), например "accounts" или "sessions"
@@ -149,6 +159,31 @@ def load_cities() -> list[str]:
     return [str(x) for x in data if x]
 
 
+def load_russian_cities_blocklist_raw() -> list[str]:
+    """Строки из data/russian_cities_blocklist.json (как заданы в файле)."""
+    path = Path(__file__).parent.parent / "data" / "russian_cities_blocklist.json"
+    if not path.exists():
+        return []
+    data = load_json(path)
+    if isinstance(data, dict) and isinstance(data.get("cities"), list):
+        items = data["cities"]
+    elif isinstance(data, list):
+        items = data
+    else:
+        return []
+    return [str(x).strip() for x in items if str(x).strip()]
+
+
+def russian_cities_blocklist_effective() -> frozenset[str]:
+    """
+    Множество нижнего регистра для фильтрации. Имена, совпадающие с городами из cities_by.json,
+    убираются — чтобы не резать одноимённые белорусские населённые пункты (Иваново, Дзержинск и т.д.).
+    """
+    raw_lower = {x.lower() for x in load_russian_cities_blocklist_raw()}
+    by_exact = {(c or "").strip().lower() for c in load_cities() if (c or "").strip()}
+    return frozenset(x for x in raw_lower if x not in by_exact)
+
+
 def load_manual_groups() -> list[str]:
     """Загрузить ручной список групп из groups.txt."""
     path = Path(__file__).parent.parent / "config" / "groups.txt"
@@ -162,6 +197,65 @@ def load_manual_groups() -> list[str]:
             if "t.me" in line or "telegram" in line.lower():
                 result.append(line)
     return result
+
+
+def group_links_file_path(settings: Settings | None = None) -> Path:
+    """
+    Путь к txt со ссылками на группы (настройка ``group_links_file`` в settings.json).
+    Если в имени есть ``/`` или ``\\`` — путь относительно cwd или абсолютный.
+    """
+    s = settings or Settings()
+    name = (s.group_links_file or "group_links.txt").strip() or "group_links.txt"
+    if "/" in name or "\\" in name:
+        return Path(name).expanduser()
+    return _config_dir() / name
+
+
+def _normalize_telegram_group_link(raw: str) -> str | None:
+    """Первая колонка строки — ссылка https://t.me/... или t.me/..."""
+    line = (raw or "").strip()
+    if not line or line.startswith("#"):
+        return None
+    link = line.split()[0].strip().strip('"').strip("'")
+    low = link.lower()
+    if "t.me/" not in low and "telegram.me/" not in low:
+        return None
+    if not link.startswith("http"):
+        link = "https://" + link.lstrip("/")
+    return link
+
+
+def load_groups_from_links_txt(
+    path: Path | None = None,
+    settings: Settings | None = None,
+) -> list[dict]:
+    """
+    Список групп в формате как у found_groups.json: по одной ссылке t.me / telegram.me на строку.
+    """
+    p = path if path is not None else group_links_file_path(settings)
+    if not p.is_file():
+        return []
+    out: list[dict] = []
+    n = 0
+    for line in p.read_text(encoding="utf-8").splitlines():
+        link = _normalize_telegram_group_link(line)
+        if not link:
+            continue
+        n += 1
+        m = re.search(r"(?:t\.me|telegram\.me)/(.+)", link, re.I)
+        tail = (m.group(1).strip("/") if m else str(n))[:80]
+        title = tail or f"group_{n}"
+        out.append(
+            {
+                "id": tail,
+                "title": title,
+                "link": link,
+                "members": 0,
+                "description": "",
+                "source": "group_links_txt",
+            }
+        )
+    return out
 
 
 def normalize_proxy_line(line: str) -> str:

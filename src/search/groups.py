@@ -12,6 +12,7 @@ from src.config import (
     load_exclude_keywords,
     load_cities,
     load_manual_groups,
+    russian_cities_blocklist_effective,
     ProxyPool,
     Settings,
 )
@@ -31,6 +32,69 @@ def _has_exclude_keywords(text: str, keywords: list[str]) -> int:
         return 0
     text_lower = text.lower()
     return sum(1 for k in keywords if k.lower() in text_lower)
+
+
+def _queries_theme_times_city(
+    themes: list[str],
+    cities: list[str],
+    *,
+    prefix: str = "",
+) -> list[str]:
+    """
+    Только пары «тема + город» из списков. Запросов без города не строится —
+    чтобы не подтягивать общие барахолки (РФ и т.д.). Города — из data/cities_by.json.
+    """
+    out: list[str] = []
+    for theme in themes:
+        t = (theme or "").strip()
+        if not t:
+            continue
+        for city in cities:
+            c = (city or "").strip()
+            if not c:
+                continue
+            q = f"{t} {c}".strip()
+            out.append(f"{prefix}{q}" if prefix else q)
+    return out
+
+
+def _text_matches_russian_city_blocklist(text: str, needles: frozenset[str]) -> bool:
+    """Совпадение с блоклистом городов РФ (подстрока для длинных имён, границы слова для коротких)."""
+    if not text or not needles:
+        return False
+    t = text.lower()
+    for n in sorted(needles, key=len, reverse=True):
+        if len(n) < 2:
+            continue
+        if " " in n or len(n) >= 5:
+            if n in t:
+                return True
+        else:
+            if re.search(rf"(?<![а-яёa-z]){re.escape(n)}(?![а-яёa-z])", t, re.I):
+                return True
+    return False
+
+
+def filter_cities_excluding_russian_blocklist(
+    cities: list[str], block: frozenset[str]
+) -> list[str]:
+    """Убрать из списка для запросов названия, попавшие в блоклист РФ."""
+    if not block:
+        return list(cities)
+    return [c for c in cities if (c or "").strip().lower() not in block]
+
+
+def filter_exclude_russian_city_groups(groups: list[dict], block: frozenset[str]) -> list[dict]:
+    """Отбросить группы, в названии/описании/ссылке которых явно фигурирует город из блоклиста РФ."""
+    if not block:
+        return groups
+    out: list[dict] = []
+    for g in groups:
+        combined = f"{g.get('title') or ''} {g.get('description') or ''} {g.get('link') or ''}"
+        if _text_matches_russian_city_blocklist(combined, block):
+            continue
+        out.append(g)
+    return out
 
 
 def filter_vape_groups(groups: list[dict]) -> list[dict]:
@@ -323,7 +387,11 @@ async def search_groups(
     on_progress: "callable[[str, str, int, int, int, str], None] | None" = None,
 ) -> list[dict]:
     """
-    Поиск групп: RapidAPI + DuckDuckGo + TG Catalog + ручной список.
+    Поиск групп: источники + ручной список. По API/каталогу/DDGS — только запросы
+    «тема из keywords × город из cities_by.json» (без «голых» тематических запросов).
+    Города из data/russian_cities_blocklist.json не участвуют в запросах и отсекаются в выдаче
+    (если exclude_russian_cities_in_search в settings). После сбора — filter_vape_groups
+    и filter_exclude_russian_city_groups.
     on_progress(source, query, current, total, found, proxy_info) — вызывается при прогрессе.
     """
     all_groups: dict[str, dict] = {}
@@ -350,6 +418,14 @@ async def search_groups(
     keywords = load_keywords()
     themes = keywords.get("search_themes", ["vape барахолка", "вейп барахолка", "парилка"])
     cities = load_cities()
+    ru_block = (
+        russian_cities_blocklist_effective()
+        if settings.exclude_russian_cities_in_search
+        else frozenset()
+    )
+    cities_for_queries = (
+        filter_cities_excluding_russian_blocklist(cities, ru_block) if ru_block else list(cities)
+    )
 
     async def _run_with_progress(
         source: str,
@@ -368,48 +444,44 @@ async def search_groups(
                 delay = random.uniform(search_min, search_max)
                 await asyncio.sleep(delay)
 
-    # Telegram Index (RapidAPI) — по городам и темам
+    # Telegram Index (RapidAPI) — только тема × город из cities_by.json
     if api_key:
-        queries_ti = [f"{theme} {city}" for theme in themes for city in cities]
+        queries_ti = _queries_theme_times_city(themes, cities_for_queries)
         if queries_ti:
             async def _do_ti(q: str, proxy: str | None):
                 return await search_telegram_index(q, api_key, proxy=proxy)
 
             await _run_with_progress("RapidAPI", queries_ti, _do_ti)
 
-    # TGStat API — платный
+    # TGStat API — платный; только тема × город
     tgstat_token = settings.tgstat_token
     if tgstat_token:
-        tgstat_queries = list(dict.fromkeys(themes[:5] + ["vape", "вейп"]))[:8]
+        tgstat_queries = _queries_theme_times_city(themes, cities_for_queries)
         async def _search_tgstat(q: str, proxy: str | None):
             return await search_tgstat_api(q, tgstat_token, proxy=proxy)
 
         await _run_with_progress("TGStat", tgstat_queries, _search_tgstat)
 
-    # Telemetr API
+    # Telemetr API — только тема × город
     telemetr_key = settings.telemetr_api_key
     if telemetr_key:
-        telemetr_queries = list(dict.fromkeys(themes[:5] + ["vape", "вейп"]))[:8]
+        telemetr_queries = _queries_theme_times_city(themes, cities_for_queries)
         async def _search_telemetr(q: str, proxy: str | None):
             return await search_telemetr_api(q, telemetr_key, proxy=proxy)
 
         await _run_with_progress("Telemetr", telemetr_queries, _search_telemetr)
 
-    # TG Catalog (tg-cat.com) — бесплатно
+    # TG Catalog (tg-cat.com) — бесплатно; только тема × город
     if tg_catalog_enabled:
-        catalog_queries = list(dict.fromkeys(
-            themes[:5] + ["vape", "вейп", "парилка", "барахолка вейп"]
-        ))[:10]
+        catalog_queries = _queries_theme_times_city(themes, cities_for_queries)
         async def _search_catalog(q: str, proxy: str | None):
             return await search_tg_catalog(q, proxy=proxy)
 
         await _run_with_progress("TG Catalog", catalog_queries, _search_catalog)
 
-    # DuckDuckGo — бесплатный поиск (site:t.me + темы)
+    # DuckDuckGo — site:t.me + только тема × город (без отдельных запросов только по теме)
     if ddgs_enabled:
-        ddgs_queries = [f"site:t.me {theme}" for theme in themes[:5]]
-        ddgs_queries += [f"site:t.me {theme} {city}" for theme in themes[:3] for city in cities[:8]]
-        ddgs_queries = ddgs_queries[:15]
+        ddgs_queries = _queries_theme_times_city(themes, cities_for_queries, prefix="site:t.me ")
         if ddgs_queries:
             async def _search_ddgs(q: str, proxy: str | None):
                 return await search_via_ddgs(q, proxy=proxy, max_results=15)
@@ -417,4 +489,7 @@ async def search_groups(
             await _run_with_progress("DuckDuckGo", ddgs_queries, _search_ddgs)
 
     groups_list = list(all_groups.values())
-    return filter_vape_groups(groups_list)
+    filtered = filter_vape_groups(groups_list)
+    if ru_block:
+        filtered = filter_exclude_russian_city_groups(filtered, ru_block)
+    return filtered

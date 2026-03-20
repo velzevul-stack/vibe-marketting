@@ -17,12 +17,14 @@ from rich.prompt import Prompt, Confirm
 from src.config import (
     Settings,
     assign_proxies_round_robin_to_accounts,
+    group_links_file_path,
     load_accounts,
+    load_groups_from_links_txt,
     load_proxies,
     mask_proxy_display,
 )
 from src.db import get_db
-from src.search import search_groups, load_manual_groups_as_list
+from src.search import search_groups
 from src.verify.scraper import scrape_group
 from src.verify.proxy_checker import check_proxies
 from src.invite import InviteManager, AccountPool
@@ -31,6 +33,104 @@ from src.accounts_bulk_prepare import run_bulk_account_prepare
 from src.session_sync import sync_sessions_dir_to_accounts
 
 console = Console()
+
+
+def _group_link_key(g: dict) -> str:
+    """Ключ для дедупликации списков групп."""
+    return str(g.get("link") or g.get("id") or "").strip().lower()
+
+
+def _merge_group_lists(*lists: list[list[dict]]) -> list[dict]:
+    seen: set[str] = set()
+    out: list[dict] = []
+    for lst in lists:
+        for g in lst:
+            k = _group_link_key(g)
+            if not k or "t.me" not in k:
+                continue
+            if k in seen:
+                continue
+            seen.add(k)
+            out.append(g)
+    return out
+
+
+def _prompt_groups_list_source(action_title: str) -> list[dict] | None:
+    """
+    Выбор источника списка групп для вступления / сбора базы.
+    None — отмена или ошибка.
+    """
+    s = Settings()
+    found_path = Path("output") / "found_groups.json"
+    gl_path = group_links_file_path(s)
+
+    console.print()
+    console.print(f"[bold]{escape(action_title)}[/] — [bold]откуда брать группы[/]")
+    console.print(f"  [cyan]1[/]  [bold]found_groups.json[/] (результат поиска, п.1)")
+    console.print(
+        f"  [cyan]2[/]  [bold]{escape(str(gl_path))}[/] — txt, одна ссылка [dim]t.me[/] / [dim]telegram.me[/] на строку"
+    )
+    console.print("  [cyan]3[/]  Другой путь к .txt (те же правила)")
+    console.print("  [cyan]4[/]  Объединить [bold]1[/] + [bold]2[/] (дубликаты ссылок убираются)")
+    console.print("  [cyan]0[/]  Отмена")
+    ch = Prompt.ask("Выбор", choices=["0", "1", "2", "3", "4"], default="1")
+
+    if ch == "0":
+        return None
+
+    if ch == "1":
+        if not found_path.is_file():
+            console.print("[red]Нет found_groups.json — выполните п.1 или используйте txt (п.2/3).[/]")
+            return None
+        try:
+            data = json.loads(found_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            console.print("[red]found_groups.json повреждён (JSON).[/]")
+            return None
+        if not isinstance(data, list) or not data:
+            console.print("[yellow]found_groups.json пуст.[/]")
+            return None
+        return data
+
+    if ch == "2":
+        groups = load_groups_from_links_txt(settings=s)
+        if not groups:
+            console.print(
+                f"[red]Нет ссылок или нет файла. Создайте {escape(str(gl_path))} "
+                f"(см. config/group_links.txt.example).[/]"
+            )
+            return None
+        return groups
+
+    if ch == "3":
+        default_s = str(gl_path)
+        raw = Prompt.ask("Полный путь к .txt", default=default_s).strip()
+        p = Path(raw).expanduser()
+        if not p.is_file():
+            console.print(f"[red]Файл не найден: {escape(str(p))}[/]")
+            return None
+        groups = load_groups_from_links_txt(path=p, settings=s)
+        if not groups:
+            console.print("[red]В файле нет строк со ссылками t.me / telegram.me[/]")
+            return None
+        return groups
+
+    # ch == "4"
+    a: list[dict] = []
+    if found_path.is_file():
+        try:
+            data = json.loads(found_path.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                a = data
+        except json.JSONDecodeError:
+            pass
+    b = load_groups_from_links_txt(settings=s)
+    merged = _merge_group_lists(a, b)
+    if not merged:
+        console.print("[red]Нечего объединять: заполните found_groups.json и/или txt со ссылками.[/]")
+        return None
+    console.print(f"[dim]Объединено уникальных групп: {len(merged)}[/]")
+    return merged
 
 
 def _mi(label: str) -> str:
@@ -88,6 +188,7 @@ def _render_main_menu() -> str:
     console.print(f"{_mi('1')} Поиск групп")
     console.print(f"{_mi('2')} Сбор базы пользователей")
     console.print(f"{_mi('7')} Просмотр найденных групп")
+    console.print(f"{_mi('9')} Очистить список найденных групп")
     console.print(f"{_mi('6')} Статистика базы")
     console.print()
     console.print("[bold]Действия в Telegram[/]")
@@ -100,7 +201,7 @@ def _render_main_menu() -> str:
     console.print()
     return Prompt.ask(
         "Выберите действие",
-        choices=["0", "1", "2", "3", "4", "5", "6", "7", "8"],
+        choices=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
         default="0",
     )
 
@@ -158,6 +259,11 @@ async def _run_search() -> None:
     if not any([s.telegram_index_api_key, s.tgstat_token, s.telemetr_api_key]):
         console.print("[yellow]API-ключи (RapidAPI/TGStat/Telemetr) не заданы. Используются бесплатные источники.[/]")
     console.print(f"[dim]Источники: {' + '.join(sources)}[/]")
+    console.print(
+        "[dim]Запросы: темы из keywords × города из [bold]data/cities_by.json[/]. "
+        "Города РФ из [bold]data/russian_cities_blocklist.json[/] не участвуют в запросах и отсекаются в выдаче "
+        f"([bold]exclude_russian_cities_in_search[/]: {s.exclude_russian_cities_in_search}).[/]"
+    )
     console.print()
 
     progress_state = {"source": "", "query": "", "cur": 0, "total": 1, "found": 0, "proxy": ""}
@@ -199,6 +305,7 @@ async def _run_search() -> None:
     out_path.parent.mkdir(exist_ok=True)
     out_path.write_text(json.dumps(groups, ensure_ascii=False, indent=2), encoding="utf-8")
     console.print(f"\n[green]Найдено групп: {len(groups)}[/]")
+    console.print("  [dim](после сбора: вейп-фильтр по keywords/exclude_keywords)[/]")
     from collections import Counter
     by_source = Counter(g.get("source", "?") for g in groups)
     for src, cnt in by_source.most_common():
@@ -212,15 +319,8 @@ async def _run_scrape() -> None:
     db = get_db()
     await db.init()
 
-    groups_path = Path("output") / "found_groups.json"
-    manual = load_manual_groups_as_list()
-    if groups_path.exists():
-        groups = json.loads(groups_path.read_text(encoding="utf-8"))
-    else:
-        groups = manual
-
+    groups = _prompt_groups_list_source("Сбор базы пользователей")
     if not groups:
-        console.print("[red]Нет групп для парсинга. Сначала выполните поиск или добавьте группы в config/groups.txt[/]")
         return
 
     console.print(f"[bold blue]Сбор базы из {len(groups)} групп[/]")
@@ -265,14 +365,9 @@ def _join_group_link(g: dict) -> str | None:
 
 
 async def _run_join_groups() -> None:
-    """Вступить в группы из found_groups.json — параллельно по аккаунтам, повтор на других при FAIL."""
-    groups_path = Path("output") / "found_groups.json"
-    if not groups_path.exists():
-        console.print("[red]Нет found_groups.json. Сначала выполните поиск групп.[/]")
-        return
-    groups = json.loads(groups_path.read_text(encoding="utf-8"))
+    """Вступить в группы — параллельно по аккаунтам, повтор на других при FAIL."""
+    groups = _prompt_groups_list_source("Вступление в группы")
     if not groups:
-        console.print("[yellow]Список групп пуст.[/]")
         return
     count = int(Prompt.ask("Сколько групп обработать", default=str(min(10, len(groups)))))
     groups = groups[:count]
@@ -621,6 +716,31 @@ def _run_view_groups() -> None:
     Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
 
 
+def _run_clear_found_groups() -> None:
+    """Очистить output/found_groups.json (список найденных групп для сбора/вступления)."""
+    found_path = Path("output") / "found_groups.json"
+    if not found_path.is_file():
+        console.print("[yellow]Файл output/found_groups.json не найден — нечего очищать.[/]")
+        Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
+        return
+    try:
+        raw = found_path.read_text(encoding="utf-8").strip()
+        data = json.loads(raw) if raw else []
+        n = len(data) if isinstance(data, list) else 0
+    except json.JSONDecodeError:
+        n = None
+        console.print("[yellow]Файл повреждён (невалидный JSON) — будет записан пустой список.[/]")
+    msg = f"Удалить все записи в found_groups.json{f' ({n} групп)' if n is not None else ''}?"
+    if not Confirm.ask(msg, default=False):
+        console.print("[dim]Отменено.[/]")
+        Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
+        return
+    found_path.parent.mkdir(parents=True, exist_ok=True)
+    found_path.write_text("[]\n", encoding="utf-8")
+    console.print("[green]Список найденных групп очищен.[/] Запустите п.1 для нового поиска.")
+    Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
+
+
 def run_menu() -> None:
     """Запуск главного меню."""
     _sett = Settings()
@@ -667,6 +787,8 @@ def run_menu() -> None:
                 asyncio.run(_run_stats())
             elif choice == "7":
                 _run_view_groups()
+            elif choice == "9":
+                _run_clear_found_groups()
             elif choice == "8":
                 _run_proxy_session_submenu()
         except KeyboardInterrupt:

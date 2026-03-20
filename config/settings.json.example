@@ -6,6 +6,11 @@
   "telemetr_api_key": "",
   "ddgs_search_enabled": true,
   "tg_catalog_enabled": true,
+  "_exclude_ru_cities_comment": "true — не искать по городам из data/russian_cities_blocklist.json и убрать их из выдачи",
+  "exclude_russian_cities_in_search": true,
+
+  "_group_links_comment": "Файл в config/: по одной ссылке t.me на строку — для сбора/вступления без поиска",
+  "group_links_file": "group_links.txt",
 
   "telethon_session_dir": "sessions",
   "_bulk_2fa_comment": "Пустая строка = пароль 2FA из кода (AUTO_2FA_PASSWORD_DEFAULT). Иначе свой.",
