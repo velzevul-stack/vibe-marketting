@@ -2,6 +2,7 @@
 import asyncio
 import json
 import random
+import sys
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,88 @@ from src.session_sync import sync_sessions_dir_to_accounts
 console = Console()
 
 _FOUND_GROUPS_PREVIOUS = Path("output") / "found_groups.previous.json"
+
+
+def _emit_zero_search_diagnostics(search_diag: dict, search_fail: str | None) -> None:
+    """
+    Дублирует диагностику в обычный stdout (flush) и в output/search_diagnostics_last.txt —
+    Rich Live(transient) / некоторые SSH/screen режут только Rich-вывод.
+    """
+    raw = search_diag.get("raw", 0)
+    av = search_diag.get("after_vape", 0)
+    fin = search_diag.get("final", 0)
+    cc = search_diag.get("cities_query_count")
+    th = search_diag.get("themes_count")
+    nresp = search_diag.get("responses_with_groups", 0)
+    err = search_diag.get("first_error")
+    finished = search_diag.get("search_finished", False)
+    lines = [
+        "",
+        "========== ДИАГНОСТИКА ПОИСКА (0 групп) ==========",
+    ]
+    if search_fail:
+        lines.append(f"Исключение: {search_fail}")
+    elif not finished and not search_diag:
+        lines.append(
+            "Метрики не собраны (пустой diagnostics — возможно сбой до входа в search_groups)."
+        )
+    elif not finished:
+        lines.append("Поиск не дошёл до конца (search_finished=false).")
+    if cc is not None and cc == 0:
+        lines.append(
+            "0 городов в запросах — проверьте data/cities_by.json и "
+            "exclude_russian_cities_in_search / блоклист РФ."
+        )
+    lines.append(f"Сырых записей до фильтров: {raw}")
+    lines.append(f"После вейп-фильтра: {av} → итог: {fin}")
+    lines.append(f"Запросов с хотя бы одной группой в ответе: {nresp}")
+    if th is not None and cc is not None:
+        lines.append(f"Тем в keywords: {th}, городов в запросах: {cc}")
+    if raw == 0 and finished:
+        lines.append(
+            "Подсказка: API ничего не вернули — часто прокси, блок tg-cat/ddgs, сеть."
+        )
+    elif av == 0 and raw > 0:
+        lines.append(
+            "Подсказка: всё отсеяно vape_markers — см. config/keywords.json и exclude_keywords.json."
+        )
+    elif fin == 0 and av > 0:
+        lines.append("Подсказка: отсеяно фильтром городов РФ (russian_cities_blocklist).")
+    if err:
+        lines.append(f"Первая ошибка HTTP/запроса: {err}")
+
+    json_path = Path("output") / "last_search_diagnostics.json"
+    txt_path = Path("output") / "search_diagnostics_last.txt"
+    try:
+        dump = {**search_diag, "menu_search_exception": search_fail}
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        json_path.write_text(json.dumps(dump, ensure_ascii=False, indent=2), encoding="utf-8")
+        lines.append(f"JSON: {json_path.resolve()}")
+    except OSError as e:
+        lines.append(f"(не удалось записать JSON: {e})")
+
+    body = "\n".join(lines) + "\n"
+    txt_note = ""
+    try:
+        txt_path.parent.mkdir(parents=True, exist_ok=True)
+        txt_path.write_text(body, encoding="utf-8")
+        txt_note = f"Текст: {txt_path.resolve()}\n"
+    except OSError:
+        pass
+
+    try:
+        sys.stdout.write(body + txt_note)
+        sys.stdout.flush()
+    except OSError:
+        pass
+
+    console.print("\n[bold yellow]Диагностика (дубликат в stdout и output/search_diagnostics_last.txt):[/]")
+    for ln in lines:
+        console.print(f"  [white]{escape(ln)}[/]")
+    if txt_note.strip():
+        console.print(f"  [dim]{escape(txt_note.strip())}[/]")
+
+
 _FOUND_GROUPS_ARCHIVE_DIR = Path("output") / "found_groups_archive"
 
 
@@ -368,7 +451,7 @@ async def _run_search() -> None:
     search_diag: dict = {}
     search_fail: str | None = None
     try:
-        with Live(make_panel(), refresh_per_second=4, console=console, transient=True) as live:
+        with Live(make_panel(), refresh_per_second=4, console=console, transient=False) as live:
             live_ref.append(live)
             groups = await search_groups(api_key, on_progress=on_progress, diagnostics=search_diag)
             progress_state["cur"] = progress_state["total"]
@@ -389,65 +472,7 @@ async def _run_search() -> None:
     console.print(f"\n[green]Найдено групп: {len(groups)}[/]")
     console.print("  [dim](после сбора: вейп-фильтр по keywords/exclude_keywords)[/]")
     if not groups:
-        raw = search_diag.get("raw", 0)
-        av = search_diag.get("after_vape", 0)
-        fin = search_diag.get("final", 0)
-        cc = search_diag.get("cities_query_count")
-        th = search_diag.get("themes_count")
-        nresp = search_diag.get("responses_with_groups", 0)
-        err = search_diag.get("first_error")
-        finished = search_diag.get("search_finished", False)
-        diag_path = Path("output") / "last_search_diagnostics.json"
-        try:
-            dump = {**search_diag, "menu_search_exception": search_fail}
-            diag_path.write_text(json.dumps(dump, ensure_ascii=False, indent=2), encoding="utf-8")
-        except OSError:
-            diag_path = None
-        console.print("\n[bold yellow]Диагностика (почему 0):[/]")
-        if search_fail:
-            console.print(f"  [red]•[/] Исключение: [bold]{escape(search_fail)}[/]")
-        elif not finished and not search_diag:
-            console.print(
-                "  [yellow]•[/] Метрики не собраны (пустой diagnostics — возможно старая версия кода "
-                "или сбой до входа в search_groups)."
-            )
-        elif not finished:
-            console.print(
-                "  [yellow]•[/] Поиск не дошёл до конца ([bold]search_finished: false[/])."
-            )
-        if cc is not None and cc == 0:
-            console.print(
-                "  [red]•[/] В запросах [bold]0 городов[/] "
-                "(проверьте cities_by.json и блоклист РФ в settings: exclude_russian_cities_in_search)."
-            )
-        console.print(f"  [dim]•[/] Сырых записей до фильтров: [bold]{raw}[/]")
-        console.print(f"  [dim]•[/] После вейп-фильтра: [bold]{av}[/] → итог: [bold]{fin}[/]")
-        console.print(
-            f"  [dim]•[/] Запросов, где API вернули хотя бы одну группу: [bold]{nresp}[/]"
-        )
-        if th is not None and cc is not None:
-            console.print(f"  [dim]•[/] Тем: {th}, городов в запросах: {cc}")
-        if raw == 0 and finished:
-            console.print(
-                "  [dim]Подсказка:[/] источники ничего не вернули — часто виноваты "
-                "[bold]прокси[/] (блок/таймаут), пустой ответ tg-cat/ddgs, нет ключей API. "
-                "Попробуйте без прокси или другой пул."
-            )
-        elif av == 0 and raw > 0:
-            console.print(
-                "  [dim]Подсказка:[/] группы были, но [bold]все отсеяны vape_markers[/] "
-                "— в title/description нет слов из keywords.json → vape_markers "
-                "(или отключите vape_markers_required в exclude_keywords.json)."
-            )
-        elif fin == 0 and av > 0:
-            console.print(
-                "  [dim]Подсказка:[/] остаток отсеян [bold]фильтром городов РФ[/] "
-                "(russian_cities_blocklist / exclude_russian_cities_in_search)."
-            )
-        if err:
-            console.print(f"  [red]Первая ошибка запроса:[/] {escape(str(err))}")
-        if diag_path and diag_path.is_file():
-            console.print(f"  [dim]Полный дамп:[/] [cyan]{diag_path}[/]")
+        _emit_zero_search_diagnostics(search_diag, search_fail)
     from collections import Counter
     by_source = Counter(g.get("source", "?") for g in groups)
     for src, cnt in by_source.most_common():
