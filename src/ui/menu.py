@@ -3,6 +3,7 @@ import asyncio
 import json
 import random
 from pathlib import Path
+from urllib.parse import urlparse
 
 from rich.console import Console
 from rich.live import Live
@@ -11,7 +12,13 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskPr
 from rich.table import Table
 from rich.prompt import Prompt, Confirm
 
-from src.config import Settings, load_accounts, load_proxies, mask_proxy_display, assign_proxies_round_robin_to_accounts
+from src.config import (
+    Settings,
+    assign_proxies_round_robin_to_accounts,
+    load_accounts,
+    load_proxies,
+    mask_proxy_display,
+)
 from src.db import get_db
 from src.search import search_groups, load_manual_groups_as_list
 from src.verify.scraper import scrape_group
@@ -21,6 +28,11 @@ from src.telethon_session_menu import run_telethon_session_menu
 from src.accounts_bulk_prepare import run_bulk_account_prepare
 
 console = Console()
+
+
+def _mi(label: str) -> str:
+    """Пункт меню для Rich: [[n]] → отображается как [n] (одинарные [ — разметка Rich)."""
+    return f"[[{label}]]"
 
 
 def _load_telegram_index_key() -> str | None:
@@ -69,24 +81,58 @@ def _render_main_menu() -> str:
             border_style="cyan",
         ))
     console.print()
-    console.print("[1] Поиск групп")
-    console.print("[2] Сбор базы пользователей")
-    console.print("[3] Вступить в группы")
-    console.print("[4] Добавить в контакты")
-    console.print("[5] Пригласить в канал")
-    console.print("[6] Статистика базы")
-    console.print("[7] Назначить прокси аккаунтам")
-    console.print("[8] Просмотр найденных групп")
-    console.print("[9] Проверить прокси")
-    console.print("[a] Сессии Telethon (.session) — список, импорт, вход")
-    console.print("[b] Подготовка аккаунтов: 2FA → прокси → сброс чужих сессий")
-    console.print("[0] Выход")
+    console.print("[bold]Данные и поиск[/]")
+    console.print(f"{_mi('1')} Поиск групп")
+    console.print(f"{_mi('2')} Сбор базы пользователей")
+    console.print(f"{_mi('7')} Просмотр найденных групп")
+    console.print(f"{_mi('6')} Статистика базы")
+    console.print()
+    console.print("[bold]Действия в Telegram[/]")
+    console.print(f"{_mi('3')} Вступить в группы")
+    console.print(f"{_mi('4')} Добавить в контакты")
+    console.print(f"{_mi('5')} Пригласить в канал")
+    console.print()
+    console.print(f"{_mi('8')} Прокси, сессии и аккаунты…")
+    console.print(f"{_mi('0')} Выход")
     console.print()
     return Prompt.ask(
         "Выберите действие",
-        choices=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b"],
+        choices=["0", "1", "2", "3", "4", "5", "6", "7", "8"],
         default="0",
     )
+
+
+def _run_proxy_session_submenu() -> None:
+    """Подменю: прокси, сессии, массовая подготовка."""
+    while True:
+        console.print()
+        console.print("[bold cyan]Прокси, сессии и аккаунты[/]")
+        console.print(f"{_mi('1')} Назначить прокси аккаунтам (из пула → accounts.json)")
+        console.print(f"{_mi('2')} Проверить прокси")
+        console.print(f"{_mi('3')} Сессии Telethon (.session) — список, импорт, вход")
+        console.print(f"{_mi('4')} Подготовка аккаунтов: 2FA → прокси → сброс чужих сессий")
+        console.print(f"{_mi('0')} Назад в главное меню")
+        console.print()
+        sub = Prompt.ask(
+            "Выбор",
+            choices=["0", "1", "2", "3", "4"],
+            default="0",
+        )
+        if sub == "0":
+            break
+        try:
+            if sub == "1":
+                _run_assign_proxies()
+            elif sub == "2":
+                asyncio.run(_run_check_proxies())
+            elif sub == "3":
+                asyncio.run(run_telethon_session_menu(console))
+            elif sub == "4":
+                asyncio.run(run_bulk_account_prepare(console))
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Прервано.[/]")
+        except Exception as e:
+            console.print(f"[red]Ошибка: {e}[/]")
 
 
 async def _run_search() -> None:
@@ -312,7 +358,10 @@ async def _run_check_proxies() -> None:
         return
 
     console.print(f"[bold blue]Проверка {len(proxies)} прокси...[/]")
-    console.print("[dim]Используется api.telegram.org, таймаут 15 сек[/]\n")
+    console.print(
+        "[dim]Цепочка: ipify → jsonip → httpbin → api.telegram.org (404 на корне TG = ОК). "
+        "Таймаут 15 сек. Разные сайты по-разному относятся к прокси.[/]\n"
+    )
 
     with Progress(
         SpinnerColumn(),
@@ -337,7 +386,11 @@ async def _run_check_proxies() -> None:
     for i, r in enumerate(results, 1):
         disp = mask_proxy_display(r.proxy)
         status = "[green]OK[/]" if r.ok else "[red]FAIL[/]"
-        extra = f"{r.latency_ms:.0f} мс" if r.latency_ms else (r.error or "—")
+        if r.ok and r.latency_ms is not None:
+            host = urlparse(r.check_url).netloc if r.check_url else "?"
+            extra = f"{r.latency_ms:.0f} мс · [dim]{host}[/]"
+        else:
+            extra = r.error or "—"
         table.add_row(str(i), disp, status, extra)
 
     console.print(table)
@@ -436,6 +489,15 @@ def _run_view_groups() -> None:
 
 def run_menu() -> None:
     """Запуск главного меню."""
+    _sett = Settings()
+    if _sett.assign_proxies_on_startup:
+        ok, msg = assign_proxies_round_robin_to_accounts()
+        if ok:
+            console.print(f"[dim]assign_proxies_on_startup:[/] [green]прокси обновлены[/] → {msg}")
+        else:
+            console.print(f"[dim]assign_proxies_on_startup:[/] [yellow]{msg}[/]")
+        console.print()
+
     while True:
         choice = _render_main_menu()
         if choice == "0":
@@ -454,15 +516,9 @@ def run_menu() -> None:
             elif choice == "6":
                 asyncio.run(_run_stats())
             elif choice == "7":
-                _run_assign_proxies()
-            elif choice == "8":
                 _run_view_groups()
-            elif choice == "9":
-                asyncio.run(_run_check_proxies())
-            elif choice == "a":
-                asyncio.run(run_telethon_session_menu(console))
-            elif choice == "b":
-                asyncio.run(run_bulk_account_prepare(console))
+            elif choice == "8":
+                _run_proxy_session_submenu()
         except KeyboardInterrupt:
             console.print("\n[yellow]Прервано.[/]")
         except Exception as e:

@@ -10,6 +10,7 @@ cp config/settings.json.example config/settings.json
 cp config/accounts.json.example config/accounts.json
 # Заполните api_id, api_hash, phone в config/accounts.json (см. my.telegram.org)
 python main.py
+python main.py -h   # справка по флагам (--assign-proxies и т.д.)
 ```
 
 Подробная инструкция: [docs/INSTALLATION.md](docs/INSTALLATION.md)
@@ -58,7 +59,7 @@ python main.py
 ## Прокси
 
 - **Поиск** и **сбор базы** — используют прокси из пула (round-robin)
-- **Назначить прокси аккаунтам** (п.7) — перераспределяет прокси из пула по аккаунтам для join/add/invite
+- **Прокси и сессии** (меню **8**) — назначить прокси из пула, проверить, сессии Telethon, подготовка аккаунтов
 
 ## Умное распределение
 

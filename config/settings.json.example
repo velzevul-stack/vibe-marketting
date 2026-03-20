@@ -8,8 +8,10 @@
   "tg_catalog_enabled": true,
 
   "telethon_session_dir": "accounts",
+  "_bulk_2fa_comment": "Пустая строка = пароль 2FA из кода (AUTO_2FA_PASSWORD_DEFAULT). Иначе свой.",
   "bulk_2fa_password": "",
   "bulk_prepare_delay_sec": 5,
+  "assign_proxies_on_startup": false,
 
   "proxies": {
     "source": "files",

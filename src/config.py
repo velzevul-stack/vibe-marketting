@@ -1,6 +1,7 @@
 """Конфигурация приложения."""
 import json
 from pathlib import Path
+from urllib.parse import quote
 
 
 def _config_dir() -> Path:
@@ -42,6 +43,21 @@ class Settings:
         self.bulk_prepare_delay_sec: float = float(
             self._data.get("bulk_prepare_delay_sec", 5.0)
         )
+        # True: при каждом запуске меню сначала round-robin прокси из пула → accounts.json
+        self.assign_proxies_on_startup: bool = bool(
+            self._data.get("assign_proxies_on_startup", False)
+        )
+
+
+# Если bulk_2fa_password в settings пустой — автоподстановка при 2FA в консоли
+AUTO_2FA_PASSWORD_DEFAULT = "suka228"
+
+
+def effective_2fa_password(settings: Settings | None = None) -> str:
+    """Пароль 2FA: из settings, иначе AUTO_2FA_PASSWORD_DEFAULT."""
+    s = settings if settings is not None else Settings()
+    p = (s.bulk_2fa_password or "").strip()
+    return p if p else AUTO_2FA_PASSWORD_DEFAULT
 
 
 def telethon_session_dir_path(settings: Settings | None = None) -> Path:
@@ -124,14 +140,43 @@ def load_manual_groups() -> list[str]:
     return result
 
 
+def normalize_proxy_line(line: str) -> str:
+    """
+    Привести строку прокси к URL для httpx/Telethon.
+
+    Поддержка:
+    - Уже URL: ``http://...``, ``socks5://...`` — без изменений
+    - ``host:port:user:pass`` — как в proxies.txt у многих провайдеров
+    - ``host:port`` — без авторизации → ``http://host:port``
+    """
+    line = (line or "").strip()
+    if not line or line.startswith("#"):
+        return ""
+    if "://" in line:
+        return line
+    parts = line.split(":", 3)
+    if len(parts) == 4 and parts[1].isdigit():
+        host, port, user, password = parts
+        u, p = quote(user, safe=""), quote(password, safe="")
+        return f"http://{u}:{p}@{host}:{port}"
+    if len(parts) == 2 and parts[1].isdigit():
+        return f"http://{parts[0]}:{parts[1]}"
+    return line
+
+
 def _read_proxy_file(filepath: Path) -> list[str]:
     """Прочитать прокси из файла."""
     if not filepath.exists():
         return []
-    return [
-        l.strip() for l in filepath.read_text(encoding="utf-8").splitlines()
-        if l.strip() and not l.strip().startswith("#")
-    ]
+    out: list[str] = []
+    for l in filepath.read_text(encoding="utf-8").splitlines():
+        raw = l.strip()
+        if not raw or raw.startswith("#"):
+            continue
+        norm = normalize_proxy_line(raw)
+        if norm:
+            out.append(norm)
+    return out
 
 
 def load_proxies() -> list[str]:
@@ -153,7 +198,11 @@ def load_proxies() -> list[str]:
                 result.extend(_read_proxy_file(path))
 
     if source in ("list", "both"):
-        result.extend(p for p in proxy_list if isinstance(p, str) and p.strip())
+        for p in proxy_list:
+            if isinstance(p, str) and p.strip():
+                n = normalize_proxy_line(p)
+                if n:
+                    result.append(n)
 
     if not result:
         path = config_dir / "proxies.txt"

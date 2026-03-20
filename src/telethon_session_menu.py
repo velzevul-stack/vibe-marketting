@@ -7,6 +7,7 @@ from rich.table import Table
 
 from src.config import (
     accounts_json_path,
+    effective_2fa_password,
     load_accounts,
     load_accounts_all,
     save_accounts_all,
@@ -146,7 +147,8 @@ async def _new_login_console(console) -> None:
         return Prompt.ask("Код из Telegram (SMS или приложение)")
 
     def password_cb() -> str:
-        return Prompt.ask("Пароль 2FA (если включён)", default="")
+        # Без ручного ввода: settings или дефолт из config
+        return effective_2fa_password()
 
     client = TelegramClient(session_base, api_id, api_hash)
     try:

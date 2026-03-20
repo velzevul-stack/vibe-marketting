@@ -1,13 +1,13 @@
 """
 Массовая подготовка аккаунтов: облачный 2FA → назначение прокси → сброс чужих сессий.
-Пароль 2FA и папка сессий задаются в settings.json (не храните пароль в git).
+Пароль 2FA: `bulk_2fa_password` в settings.json или константа в `config.effective_2fa_password`.
 """
 from __future__ import annotations
 
 import asyncio
 import random
 
-from rich.prompt import Confirm, Prompt
+from rich.prompt import Confirm
 from telethon import TelegramClient
 from telethon.tl.functions.account import GetPasswordRequest
 from telethon.tl.functions.auth import ResetAuthorizationsRequest
@@ -15,6 +15,7 @@ from telethon.tl.functions.auth import ResetAuthorizationsRequest
 from src.config import (
     Settings,
     assign_proxies_round_robin_to_accounts,
+    effective_2fa_password,
     load_accounts,
     load_proxies,
     telethon_session_file,
@@ -35,7 +36,7 @@ def _client_for(acc: dict, proxy: str | None, settings: Settings) -> TelegramCli
 async def run_bulk_account_prepare(console) -> None:
     """
     1) Включить облачный пароль 2FA (без email), если ещё не включён.
-    2) Назначить прокси из пула (как п.7).
+    2) Назначить прокси из пула (как меню 8 → 1).
     3) Подключиться с прокси и вызвать auth.resetAuthorizations (все другие устройства вылетают).
     """
     settings = Settings()

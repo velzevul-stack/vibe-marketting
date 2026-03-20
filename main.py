@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Vibe Marketing CLI — Telegram Lead Scraper для вейп-продавцов."""
-import asyncio
+import argparse
 import sys
 from pathlib import Path
 
@@ -18,8 +18,48 @@ if sys.platform == "win32":
 from src.ui.menu import run_menu
 
 
+def _cli_assign_proxies_only() -> int:
+    """Только перезаписать proxy в accounts.json из пула (без меню)."""
+    from rich.console import Console
+    from src.config import assign_proxies_round_robin_to_accounts, load_accounts, load_proxies
+
+    con = Console()
+    if not load_accounts():
+        con.print("[red]Нет аккаунтов в config/accounts.json[/]")
+        return 1
+    if not load_proxies():
+        con.print("[red]Нет прокси в пуле[/]")
+        return 1
+    ok, msg = assign_proxies_round_robin_to_accounts()
+    if ok:
+        con.print(f"[green]Прокси назначены:[/] {msg}")
+        return 0
+    con.print(f"[red]{msg}[/]")
+    return 1
+
+
 def main() -> None:
     """Точка входа."""
+    parser = argparse.ArgumentParser(
+        prog="python main.py",
+        description="Vibe Marketing CLI — поиск групп Telegram, сбор базы, join/контакты/инвайты.",
+        epilog=(
+            "Примеры:\n"
+            "  python main.py                  интерактивное меню\n"
+            "  python main.py --assign-proxies назначить прокси из пула в accounts.json и выйти\n"
+            "\n"
+            "Справка по конфигу: config/CONFIG.md, docs/PROXY_AND_ACCOUNTS.md"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--assign-proxies",
+        action="store_true",
+        help="Перезаписать proxy у всех аккаунтов из пула (proxies.txt / settings) и выйти",
+    )
+    args = parser.parse_args()
+    if args.assign_proxies:
+        raise SystemExit(_cli_assign_proxies_only())
     run_menu()
 
 
