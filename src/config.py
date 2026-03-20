@@ -188,6 +188,17 @@ def normalize_proxy_line(line: str) -> str:
     return line
 
 
+def is_placeholder_proxy_url(proxy: str | None) -> bool:
+    """
+    Шаблонные URL из документации (example.com и т.п.).
+    Их часто копируют в accounts.json; проверка прокси при этом смотрит на proxies.txt — источники разные.
+    """
+    if not proxy or not str(proxy).strip():
+        return False
+    low = str(proxy).lower()
+    return "example.com" in low or "example.org" in low
+
+
 def proxy_url_to_telethon(
     proxy: str | tuple | list | dict | None,
 ) -> tuple | dict | None:

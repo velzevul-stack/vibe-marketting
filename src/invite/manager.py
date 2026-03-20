@@ -17,6 +17,7 @@ from telethon.tl.functions.messages import ImportChatInviteRequest
 from src.config import (
     load_accounts,
     load_proxies,
+    is_placeholder_proxy_url,
     proxy_url_to_telethon,
     Settings,
     telethon_session_file,
@@ -125,6 +126,8 @@ class AccountPool:
             proxy = self._get_next_proxy()
         if not proxy:
             proxy = acc.get("proxy")
+        if is_placeholder_proxy_url(proxy):
+            proxy = None
         if not proxy and self._proxy_pool:
             proxy = self._get_next_proxy()
         proxy_tg = proxy_url_to_telethon(proxy)

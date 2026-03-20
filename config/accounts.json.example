@@ -4,17 +4,16 @@
     "_template": true
   },
   {
+    "_comment_account": "Поле proxy не копируйте из шаблона. Либо п.8→1 «Назначить прокси» (из proxies.txt), либо реальный URL; иначе Telethon будет лезть на выдуманный хост.",
     "session_name": "account1",
     "api_id": 12345678,
     "api_hash": "abcdef1234567890abcdef1234567890",
-    "phone": "+375291234567",
-    "proxy": "socks5://user:password@proxy.example.com:1080"
+    "phone": "+375291234567"
   },
   {
     "session_name": "account2",
     "api_id": 12345678,
     "api_hash": "abcdef1234567890abcdef1234567890",
-    "phone": "+375299876543",
-    "proxy": "socks5://user:password@proxy2.example.com:1080"
+    "phone": "+375299876543"
   }
 ]

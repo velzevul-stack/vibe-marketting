@@ -486,7 +486,10 @@ def _run_assign_proxies() -> None:
         return
     ok, msg = assign_proxies_round_robin_to_accounts()
     if ok:
-        console.print(f"[green]Прокси назначены. Сохранено в {msg}[/]")
+        console.print(
+            f"[green]Прокси назначены:[/] у каждого аккаунта в [bold]accounts.json[/] обновлено поле [bold]proxy[/] "
+            f"(round-robin из пула). Файл: [cyan]{msg}[/]"
+        )
     else:
         console.print(f"[red]{msg}[/]")
     Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")

@@ -16,6 +16,7 @@ from src.config import (
     Settings,
     assign_proxies_round_robin_to_accounts,
     effective_2fa_password,
+    is_placeholder_proxy_url,
     load_accounts,
     load_proxies,
     proxy_url_to_telethon,
@@ -119,6 +120,8 @@ async def run_bulk_account_prepare(console) -> None:
         name = acc.get("session_name", "?")
         path = telethon_session_file(name, settings)
         proxy = acc.get("proxy")
+        if is_placeholder_proxy_url(proxy):
+            proxy = None
         if not path.is_file():
             console.print(f"  [yellow]{name}: нет файла сессии — пропуск[/]")
             continue
