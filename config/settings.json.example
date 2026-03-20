@@ -7,6 +7,10 @@
   "ddgs_search_enabled": true,
   "tg_catalog_enabled": true,
 
+  "telethon_session_dir": "accounts",
+  "bulk_2fa_password": "",
+  "bulk_prepare_delay_sec": 5,
+
   "proxies": {
     "source": "files",
     "files": ["proxies.txt"],

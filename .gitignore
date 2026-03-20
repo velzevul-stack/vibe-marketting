@@ -1,4 +1,5 @@
 sessions/
+accounts/
 output/*.db
 output/*.json
 config/accounts.json

@@ -11,12 +11,14 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskPr
 from rich.table import Table
 from rich.prompt import Prompt, Confirm
 
-from src.config import Settings, load_accounts, load_proxies, mask_proxy_display
+from src.config import Settings, load_accounts, load_proxies, mask_proxy_display, assign_proxies_round_robin_to_accounts
 from src.db import get_db
 from src.search import search_groups, load_manual_groups_as_list
 from src.verify.scraper import scrape_group
 from src.verify.proxy_checker import check_proxies
 from src.invite import InviteManager, AccountPool
+from src.telethon_session_menu import run_telethon_session_menu
+from src.accounts_bulk_prepare import run_bulk_account_prepare
 
 console = Console()
 
@@ -76,9 +78,15 @@ def _render_main_menu() -> str:
     console.print("[7] Назначить прокси аккаунтам")
     console.print("[8] Просмотр найденных групп")
     console.print("[9] Проверить прокси")
+    console.print("[a] Сессии Telethon (.session) — список, импорт, вход")
+    console.print("[b] Подготовка аккаунтов: 2FA → прокси → сброс чужих сессий")
     console.print("[0] Выход")
     console.print()
-    return Prompt.ask("Выберите действие", choices=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"], default="0")
+    return Prompt.ask(
+        "Выберите действие",
+        choices=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b"],
+        default="0",
+    )
 
 
 async def _run_search() -> None:
@@ -349,11 +357,11 @@ def _run_assign_proxies() -> None:
         return
     if not Confirm.ask(f"Назначить {len(proxies)} прокси для {len(accounts)} аккаунтов?"):
         return
-    for i, acc in enumerate(accounts):
-        acc["proxy"] = proxies[i % len(proxies)]
-    path = Path(__file__).parent.parent / "config" / "accounts.json"
-    path.write_text(json.dumps(accounts, ensure_ascii=False, indent=2), encoding="utf-8")
-    console.print(f"[green]Прокси назначены. Сохранено в {path}[/]")
+    ok, msg = assign_proxies_round_robin_to_accounts()
+    if ok:
+        console.print(f"[green]Прокси назначены. Сохранено в {msg}[/]")
+    else:
+        console.print(f"[red]{msg}[/]")
     Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
 
 
@@ -451,6 +459,10 @@ def run_menu() -> None:
                 _run_view_groups()
             elif choice == "9":
                 asyncio.run(_run_check_proxies())
+            elif choice == "a":
+                asyncio.run(run_telethon_session_menu(console))
+            elif choice == "b":
+                asyncio.run(run_bulk_account_prepare(console))
         except KeyboardInterrupt:
             console.print("\n[yellow]Прервано.[/]")
         except Exception as e:

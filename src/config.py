@@ -35,7 +35,44 @@ class Settings:
         self.tg_catalog_enabled: bool = self._data.get("tg_catalog_enabled", True)
         self.tgstat_token: str | None = self._data.get("tgstat_token") or None
         self.telemetr_api_key: str | None = self._data.get("telemetr_api_key") or None
+        # Папка с *.session (относительно корня проекта / cwd), например "accounts" или "sessions"
+        self.telethon_session_dir: str = self._data.get("telethon_session_dir", "sessions")
+        # Для массовой подготовки аккаунтов (п. b): пароль облачного 2FA; лучше задать в settings.json локально
+        self.bulk_2fa_password: str | None = (self._data.get("bulk_2fa_password") or None)
+        self.bulk_prepare_delay_sec: float = float(
+            self._data.get("bulk_prepare_delay_sec", 5.0)
+        )
 
+
+def telethon_session_dir_path(settings: Settings | None = None) -> Path:
+    """Каталог для Telethon *.session (создаётся при необходимости)."""
+    s = settings or Settings()
+    p = Path(s.telethon_session_dir)
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def telethon_session_file(session_name: str, settings: Settings | None = None) -> Path:
+    """Путь к файлу сессии: <telethon_session_dir>/<name>.session"""
+    return telethon_session_dir_path(settings) / f"{session_name}.session"
+
+
+def assign_proxies_round_robin_to_accounts() -> tuple[bool, str]:
+    """
+    Назначить прокси из пула аккаунтам (round-robin).
+    Сохраняет весь accounts.json (включая служебные строки), не только список аккаунтов.
+    """
+    proxies = load_proxies()
+    if not proxies:
+        return False, "Нет прокси в пуле (proxies.txt / settings.json)"
+    all_rows = load_accounts_all()
+    tele = load_accounts()
+    if not tele:
+        return False, "Нет аккаунтов в accounts.json"
+    for i, acc in enumerate(tele):
+        acc["proxy"] = proxies[i % len(proxies)]
+    save_accounts_all(all_rows)
+    return True, str(accounts_json_path())
 
 
 def load_json(path: Path) -> dict | list:
@@ -174,10 +211,32 @@ class ProxyPool:
         return self._proxies.copy()
 
 
-def load_accounts() -> list[dict]:
-    """Загрузить аккаунты из accounts.json."""
-    path = Path(__file__).parent.parent / "config" / "accounts.json"
-    data = load_json(path)
+def accounts_json_path() -> Path:
+    """Путь к config/accounts.json."""
+    return _config_dir() / "accounts.json"
+
+
+def load_accounts_all() -> list[dict]:
+    """Все объекты из accounts.json (включая комментарии-заглушки)."""
+    data = load_json(accounts_json_path())
     if not isinstance(data, list):
         return []
-    return [a for a in data if isinstance(a, dict) and a.get("api_id") and a.get("api_hash")]
+    return [x for x in data if isinstance(x, dict)]
+
+
+def save_accounts_all(rows: list[dict]) -> None:
+    """Сохранить accounts.json целиком."""
+    path = accounts_json_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(rows, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def load_accounts() -> list[dict]:
+    """Аккаунты Telethon: api_id, api_hash, без шаблонов _template."""
+    return [
+        a
+        for a in load_accounts_all()
+        if a.get("api_id")
+        and a.get("api_hash")
+        and not a.get("_template")
+    ]

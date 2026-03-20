@@ -13,7 +13,7 @@ from telethon.tl.functions.contacts import AddContactRequest, GetContactsRequest
 from telethon.tl.functions.channels import InviteToChannelRequest, JoinChannelRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest
 
-from src.config import load_accounts, load_proxies, Settings
+from src.config import load_accounts, load_proxies, Settings, telethon_session_file
 
 
 @dataclass
@@ -95,8 +95,7 @@ class AccountPool:
         api_hash = acc.get("api_hash")
         if not api_id or not api_hash:
             return None
-        session_path = Path("sessions") / f"{session_name}.session"
-        session_path.parent.mkdir(exist_ok=True)
+        session_path = telethon_session_file(session_name)
         proxy = None
         if prefer_pool_for_read and self._proxy_pool:
             proxy = self._get_next_proxy()
