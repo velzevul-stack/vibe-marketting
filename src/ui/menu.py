@@ -337,9 +337,9 @@ async def _run_join_groups() -> None:
                     continue
                 if ok:
                     ok_local += 1
-                    console.print(f"  [green]OK[/] [dim]{escape(str(sn))}[/] — {escape(str(title))}[/]")
+                    console.print(f"  [green]OK[/] [dim]{escape(str(sn))} — {escape(str(title))}[/]")
                 else:
-                    console.print(f"  [red]FAIL[/] [dim]{escape(str(sn))}[/] — {escape(str(title))}[/]")
+                    console.print(f"  [red]FAIL[/] [dim]{escape(str(sn))} — {escape(str(title))}[/]")
                     fails_local.append((g, tried | {sn}))
                 await asyncio.sleep(max(1, random.uniform(sett.delay_join_min, sett.delay_join_max)))
             return fails_local, ok_local
