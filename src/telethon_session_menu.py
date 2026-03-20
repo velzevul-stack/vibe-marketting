@@ -9,8 +9,10 @@ from src.config import (
     Settings,
     accounts_json_path,
     effective_2fa_password,
+    is_placeholder_proxy_url,
     load_accounts,
     load_session_bind_specs_from_file,
+    proxy_url_to_telethon,
     session_bind_file_path,
     telethon_session_dir_path,
     upsert_telethon_account,
@@ -171,6 +173,88 @@ async def _new_login_console(console) -> None:
     if Confirm.ask("Записать аккаунт в accounts.json?", default=True):
         _append_account(session_name, api_id, api_hash, phone=phone, proxy=proxy)
         console.print(f"[green]Сохранено в {accounts_json_path()}[/]")
+
+
+async def login_client_for_one_off_scrape(console):
+    """
+    Разовая авторизация для сбора базы (меню 2→1→отдельный).
+    Порядок: имя сессии → api → телефон → [прокси да/нет] → код → 2FA при необходимости.
+
+    Возвращает (TelegramClient, meta) с уже подключённым клиентом; disconnect — у вызывающего.
+    meta: session_name, api_id, api_hash, phone, proxy_url (str | None).
+    """
+    from telethon import TelegramClient
+    from telethon.errors import SessionPasswordNeededError
+
+    session_name = Prompt.ask("Имя сессии (будет sessions/ИМЯ.session)").strip()
+    if not session_name or "/" in session_name or "\\" in session_name:
+        console.print("[red]Некорректное имя сессии[/]")
+        return None
+
+    settings = Settings()
+    pair = _ask_api_id_hash_or_defaults(console, settings)
+    if not pair:
+        return None
+    api_id, api_hash = pair
+
+    phone = Prompt.ask("Телефон в формате +375…").strip()
+    if not phone:
+        console.print("[red]Нужен телефон[/]")
+        return None
+
+    proxy_url: str | None = None
+    if Confirm.ask("Использовать прокси для Telegram (этот сбор)?", default=False):
+        raw = Prompt.ask("Прокси URL (socks5:// или http://)", default="").strip()
+        if raw and not is_placeholder_proxy_url(raw):
+            proxy_url = raw
+
+    proxy_tg = proxy_url_to_telethon(proxy_url)
+    _sessions_dir().mkdir(parents=True, exist_ok=True)
+    session_base = str(_sessions_dir() / session_name)
+
+    def code_cb() -> str:
+        return Prompt.ask("Код из Telegram (SMS или приложение)")
+
+    def password_cb() -> str:
+        manual = Prompt.ask(
+            "Пароль облачного 2FA (или Enter — взять из settings / встроенный дефолт)",
+            default="",
+        ).strip()
+        if manual:
+            return manual
+        return effective_2fa_password(settings)
+
+    client = TelegramClient(session_base, api_id, api_hash, proxy=proxy_tg)
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            sent = await client.send_code_request(phone)
+            try:
+                await client.sign_in(
+                    phone,
+                    code_cb(),
+                    phone_code_hash=sent.phone_code_hash,
+                )
+            except SessionPasswordNeededError:
+                await client.sign_in(password=password_cb())
+        me = await client.get_me()
+        console.print(f"[green]Авторизовано: {getattr(me, 'username', None) or me.id}[/]")
+    except Exception as e:
+        console.print(f"[red]Ошибка входа: {e}[/]")
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        return None
+
+    meta = {
+        "session_name": session_name,
+        "api_id": api_id,
+        "api_hash": api_hash,
+        "phone": phone,
+        "proxy_url": proxy_url,
+    }
+    return client, meta
 
 
 def _ask_api_id_hash_or_defaults(console, settings: Settings) -> tuple[int, str] | None:

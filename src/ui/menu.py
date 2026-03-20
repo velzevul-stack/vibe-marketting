@@ -18,19 +18,22 @@ from rich.prompt import Prompt, Confirm
 
 from src.config import (
     Settings,
+    accounts_json_path,
     assign_proxies_round_robin_to_accounts,
+    clone_settings,
     group_links_file_path,
     load_accounts,
     load_groups_from_links_txt,
     load_proxy_pool_from_config,
     mask_proxy_display,
+    upsert_telethon_account,
 )
 from src.db import get_db
 from src.search import search_groups
 from src.verify.scraper import scrape_group
 from src.verify.proxy_checker import check_proxies
 from src.invite import InviteManager, AccountPool
-from src.telethon_session_menu import run_telethon_session_menu
+from src.telethon_session_menu import login_client_for_one_off_scrape, run_telethon_session_menu
 from src.accounts_bulk_prepare import run_bulk_account_prepare
 from src.session_sync import sync_sessions_dir_to_accounts
 
@@ -303,7 +306,7 @@ def _render_main_menu() -> str:
     console.print()
     console.print("[bold]Данные и поиск[/]")
     console.print(f"{_mi('1')} Поиск групп")
-    console.print(f"{_mi('2')} Сбор базы пользователей")
+    console.print(f"{_mi('2')} Сбор базы пользователей [dim](п.1 — один аккаунт / стандарт)[/]")
     console.print(f"{_mi('7')} Просмотр найденных групп")
     console.print(f"{_mi('6')} Статистика базы")
     console.print(
@@ -481,10 +484,14 @@ async def _run_search() -> None:
     Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
 
 
-async def _run_scrape() -> None:
-    """Сбор базы пользователей."""
+async def _run_scrape(
+    sett: Settings | None = None,
+    fixed_client=None,
+) -> None:
+    """Сбор базы пользователей. ``fixed_client`` — уже авторизованный Telethon (режим «отдельный»)."""
     db = get_db()
     await db.init()
+    sett = sett or Settings()
 
     groups = _prompt_groups_list_source("Сбор базы пользователей")
     if not groups:
@@ -493,8 +500,20 @@ async def _run_scrape() -> None:
     console.print(f"[bold blue]Сбор базы из {len(groups)} групп[/]")
     limit = int(Prompt.ask("Лимит сообщений на группу", default="300"))
 
-    pool = AccountPool()
-    max_concurrent = max(1, len(pool.accounts))
+    if fixed_client is not None:
+        pool = None
+        max_concurrent = 1
+        console.print(
+            "[dim]Отдельная сессия: группы по одной, один и тот же клиент Telethon.[/]"
+        )
+    else:
+        pool = AccountPool()
+        max_concurrent = max(1, len(pool.accounts))
+        if (sett.scrape_session_name or "").strip():
+            max_concurrent = 1
+            console.print(
+                "[dim]Одна закреплённая сессия — группы последовательно (без параллели).[/]"
+            )
     sem = asyncio.Semaphore(max_concurrent)
 
     async def _scrape_one(i: int, g: dict):
@@ -507,14 +526,21 @@ async def _run_scrape() -> None:
                 def on_progress(cur, tot):
                     pct = (cur / tot * 100) if tot else 0
                     console.print(f"  [dim]{escape(str(title))}: {cur}/{tot} ({pct:.1f}%)[/]", end="\r")
-                hot, warm = await scrape_group(link, limit=limit, pool=pool, on_progress=on_progress)
+                hot, warm = await scrape_group(
+                    link,
+                    limit=limit,
+                    pool=pool,
+                    settings=sett,
+                    on_progress=on_progress,
+                    client=fixed_client,
+                )
                 console.print(f"  [green]{escape(str(title))}: {hot} горячих, {warm} тёплых[/]")
                 return hot, warm
             except Exception as e:
                 console.print(f"  [red]{escape(str(title))}: Ошибка {escape(str(e))}[/]")
                 return 0, 0
             finally:
-                await asyncio.sleep(2)
+                await asyncio.sleep(max(0.0, sett.delay_scrape_between_groups))
 
     tasks = [_scrape_one(i, g) for i, g in enumerate(groups)]
     results = await asyncio.gather(*tasks)
@@ -522,6 +548,99 @@ async def _run_scrape() -> None:
     total_warm = sum(r[1] for r in results)
     console.print(f"\n[bold green]Итого: {total_hot} горячих, {total_warm} тёплых[/]")
     Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
+
+
+async def _run_scrape_single_account_branch() -> None:
+    """П.2→1: общий аккаунт без прокси или отдельный вход."""
+    console.print()
+    console.print("[bold]Один аккаунт для сбора[/]")
+    console.print(
+        f"{_mi('1')} [bold]Общий[/]: выбрать аккаунт из accounts.json — сбор [bold]без прокси[/] (только этот session)"
+    )
+    console.print(
+        f"{_mi('2')} [bold]Отдельный[/]: вход в консоли (api, телефон, код, 2FA), затем вопрос про прокси"
+    )
+    console.print(f"{_mi('0')} Назад")
+    ch = Prompt.ask("Выбор", choices=["0", "1", "2"], default="0")
+    if ch == "0":
+        return
+    if ch == "1":
+        accs = load_accounts()
+        if not accs:
+            console.print(
+                "[red]Нет аккаунтов в accounts.json.[/] Добавьте сессию: главное меню → 8 → 3."
+            )
+            return
+        for i, a in enumerate(accs, 1):
+            name = a.get("session_name", "?")
+            console.print(f"  [cyan]{i}[/]  {escape(str(name))}")
+        idx_s = Prompt.ask("Номер аккаунта", default="1").strip()
+        try:
+            idx = int(idx_s) - 1
+        except ValueError:
+            console.print("[red]Нужен номер из списка.[/]")
+            return
+        if idx < 0 or idx >= len(accs):
+            console.print("[red]Нет такого номера.[/]")
+            return
+        picked = accs[idx]
+        name = picked.get("session_name")
+        if not name:
+            console.print("[red]У записи нет session_name.[/]")
+            return
+        console.print(
+            "[dim]Прокси для сбора отключён (пул и proxy в JSON для этого прогона не используются).[/]"
+        )
+        s_one = clone_settings(scrape_use_proxy=False, scrape_session_name=str(name))
+        await _run_scrape(s_one)
+        return
+
+    logged = await login_client_for_one_off_scrape(console)
+    if not logged:
+        return
+    client, meta = logged
+    sett = Settings()
+    try:
+        await _run_scrape(sett, fixed_client=client)
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+    if Confirm.ask("Добавить этот аккаунт в accounts.json?", default=False):
+        upsert_telethon_account(
+            meta["session_name"],
+            meta["api_id"],
+            meta["api_hash"],
+            phone=meta.get("phone"),
+            proxy=meta.get("proxy_url"),
+        )
+        console.print(f"[green]Записано в {accounts_json_path()}[/]")
+
+
+def _run_scrape_entry() -> None:
+    """Главное меню п.2: подменю — п.1 один аккаунт или стандартный сбор."""
+    while True:
+        console.print()
+        console.print("[bold cyan]Сбор базы пользователей[/]")
+        console.print(
+            f"{_mi('1')} Один аккаунт: общий (из списка, без прокси) или отдельный (вход в консоли + прокси опционально)"
+        )
+        console.print(f"{_mi('2')} Стандартный сбор (settings: пул аккаунтов и scrape_use_proxy / прокси)")
+        console.print(f"{_mi('0')} Назад в главное меню")
+        sub = Prompt.ask("Выбор", choices=["0", "1", "2"], default="2")
+        if sub == "0":
+            break
+        try:
+            if sub == "2":
+                asyncio.run(_run_scrape())
+            elif sub == "1":
+                asyncio.run(_run_scrape_single_account_branch())
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Прервано.[/]")
+        except Exception as e:
+            console.print(f"[red]Ошибка: {escape(str(e))}[/]")
+        Prompt.ask("\n[dim]Нажмите Enter…[/]", default="")
 
 
 def _join_group_link(g: dict) -> str | None:
@@ -992,7 +1111,7 @@ def run_menu() -> None:
             if choice == "1":
                 asyncio.run(_run_search())
             elif choice == "2":
-                asyncio.run(_run_scrape())
+                _run_scrape_entry()
             elif choice == "3":
                 asyncio.run(_run_join_groups())
             elif choice == "4":

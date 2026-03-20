@@ -108,11 +108,15 @@ class AccountPool:
             return [a.session_name for a in self.accounts]
 
     def get_client(
-        self, session_name: str, prefer_pool_for_read: bool = False
+        self,
+        session_name: str,
+        prefer_pool_for_read: bool = False,
+        settings: Settings | None = None,
     ) -> TelegramClient | None:
         """
         Создать клиент для аккаунта.
-        Прокси: при prefer_pool_for_read (поиск/сбор) — из пула; иначе из аккаунта или пула.
+        Сбор (prefer_pool_for_read): при scrape_use_proxy — пул, иначе аккаунт и пул не используются.
+        Join/invite: прокси аккаунта или пул.
         """
         accs = load_accounts()
         acc = next((a for a in accs if a.get("session_name") == session_name), None)
@@ -123,16 +127,20 @@ class AccountPool:
         if not api_id or not api_hash:
             return None
         session_path = telethon_session_file(session_name)
+        sett = settings or Settings()
         proxy = None
         if is_proxy_enabled():
-            if prefer_pool_for_read and self._proxy_pool:
-                proxy = self._get_next_proxy()
-            if not proxy:
-                proxy = acc.get("proxy")
-            if is_placeholder_proxy_url(proxy):
+            if prefer_pool_for_read and not sett.scrape_use_proxy:
                 proxy = None
-            if not proxy and self._proxy_pool:
-                proxy = self._get_next_proxy()
+            else:
+                if prefer_pool_for_read and self._proxy_pool:
+                    proxy = self._get_next_proxy()
+                if not proxy:
+                    proxy = acc.get("proxy")
+                if is_placeholder_proxy_url(proxy):
+                    proxy = None
+                if not proxy and self._proxy_pool:
+                    proxy = self._get_next_proxy()
         proxy_tg = proxy_url_to_telethon(proxy)
         return TelegramClient(
             str(session_path),

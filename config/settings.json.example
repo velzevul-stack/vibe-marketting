@@ -19,6 +19,10 @@
   "assign_proxies_on_startup": false,
   "_proxy_enabled_comment": "false — не использовать прокси в поиске и Telethon (можно переключать: python main.py --proxy on|off)",
   "proxy_enabled": true,
+  "_scrape_proxy_comment": "false — сбор базы без прокси из пула (при proxy_enabled true); join/invite без изменений",
+  "scrape_use_proxy": true,
+  "_scrape_session_comment": "имя session_name — только эта сессия для сбора, группы по очереди; пусто — ротация как раньше",
+  "scrape_session_name": "",
   "sync_sessions_on_startup": true,
 
   "telethon_default_api": {
@@ -41,7 +45,9 @@
     "invite_min": 90,
     "invite_max": 240,
     "search_min": 2,
-    "search_max": 6
+    "search_max": 6,
+    "scrape_between_groups": 2,
+    "scrape_per_message": 0
   }
 }
 

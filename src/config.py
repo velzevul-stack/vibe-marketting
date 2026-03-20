@@ -70,6 +70,12 @@ class Settings:
         self.delay_invite_max: int = delays.get("invite_max", 240)
         self.delay_search_min: float = delays.get("search_min", 2.0)
         self.delay_search_max: float = delays.get("search_max", 6.0)
+        self.delay_scrape_between_groups: float = float(
+            delays.get("scrape_between_groups", 2.0)
+        )
+        self.delay_scrape_per_message: float = float(
+            delays.get("scrape_per_message", 0.0)
+        )
         self.telegram_index_api_key: str | None = self._data.get("telegram_index_api_key") or None
         self.ddgs_search_enabled: bool = self._data.get("ddgs_search_enabled", True)
         self.tg_catalog_enabled: bool = self._data.get("tg_catalog_enabled", True)
@@ -101,6 +107,13 @@ class Settings:
         )
         # False — не использовать прокси ни из пула, ни из accounts.json (поиск, Telethon)
         self.proxy_enabled: bool = bool(self._data.get("proxy_enabled", True))
+        # False — сбор базы (Telethon) без прокси из пула; join/invite по-прежнему с пулом/аккаунтом
+        self.scrape_use_proxy: bool = bool(self._data.get("scrape_use_proxy", True))
+        # Имя session_name из accounts.json — только эта сессия для сбора (остальные аккаунты не ротируются)
+        _ssn = self._data.get("scrape_session_name")
+        self.scrape_session_name: str | None = (
+            str(_ssn).strip() if _ssn and str(_ssn).strip() else None
+        )
         # Дефолтные api для автопривязки .session → accounts.json (меню сессий, п.4)
         tda = self._data.get("telethon_default_api") or {}
         self.default_telethon_api_id: int | None = None
@@ -113,6 +126,16 @@ class Settings:
         self.default_telethon_api_hash: str | None = (
             str(_h).strip() if _h and str(_h).strip() else None
         )
+
+
+def clone_settings(**overrides) -> Settings:
+    """Копия настроек из settings.json с подменой верхнеуровневых ключей (один прогон меню)."""
+    import copy
+
+    data = copy.deepcopy(_load_settings())
+    for k, v in overrides.items():
+        data[k] = v
+    return Settings(data=data)
 
 
 # Если bulk_2fa_password в settings пустой — автоподстановка при 2FA в консоли
