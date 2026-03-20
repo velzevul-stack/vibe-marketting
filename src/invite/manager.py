@@ -2,6 +2,7 @@
 import asyncio
 import random
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -33,6 +34,7 @@ class AccountPool:
         self.accounts: list[AccountState] = []
         self._proxy_pool: list[str] = []
         self._proxy_index: int = 0
+        self._state_lock = threading.Lock()
         self._load()
 
     def _load(self) -> None:
@@ -44,41 +46,57 @@ class AccountPool:
 
     def _get_next_proxy(self) -> str | None:
         """Следующий прокси из пула (round-robin)."""
-        if not self._proxy_pool:
-            return None
-        proxy = self._proxy_pool[self._proxy_index % len(self._proxy_pool)]
-        self._proxy_index += 1
-        return proxy
+        with self._state_lock:
+            if not self._proxy_pool:
+                return None
+            proxy = self._proxy_pool[self._proxy_index % len(self._proxy_pool)]
+            self._proxy_index += 1
+            return proxy
 
     def get_best_account(self) -> AccountState | None:
         """Выбрать аккаунт с наименьшей нагрузкой (least-used-first, FloodWait-aware)."""
-        now = time.time()
-        available = [
-            a for a in self.accounts
-            if a.is_available and a.flood_wait_until < now
-        ]
-        if not available:
-            return None
-        # Сортировка: меньше действий сегодня, дольше не использовался
-        return min(
-            available,
-            key=lambda x: (x.actions_today, x.last_action_at),
-        )
+        with self._state_lock:
+            now = time.time()
+            available = [
+                a for a in self.accounts
+                if a.is_available and a.flood_wait_until < now
+            ]
+            if not available:
+                return None
+            return min(
+                available,
+                key=lambda x: (x.actions_today, x.last_action_at),
+            )
 
     def mark_used(self, session_name: str) -> None:
         """Отметить использование аккаунта."""
-        for a in self.accounts:
-            if a.session_name == session_name:
-                a.actions_today += 1
-                a.last_action_at = time.time()
-                break
+        with self._state_lock:
+            for a in self.accounts:
+                if a.session_name == session_name:
+                    a.actions_today += 1
+                    a.last_action_at = time.time()
+                    break
 
     def mark_flood_wait(self, session_name: str, wait_seconds: int) -> None:
         """Исключить аккаунт из пула до истечения FloodWait."""
-        for a in self.accounts:
-            if a.session_name == session_name:
-                a.flood_wait_until = time.time() + wait_seconds
-                break
+        with self._state_lock:
+            for a in self.accounts:
+                if a.session_name == session_name:
+                    a.flood_wait_until = time.time() + wait_seconds
+                    break
+
+    def account_state_by_name(self, session_name: str) -> AccountState | None:
+        """Состояние аккаунта по имени сессии."""
+        with self._state_lock:
+            for a in self.accounts:
+                if a.session_name == session_name:
+                    return a
+        return None
+
+    def session_names_ordered(self) -> list[str]:
+        """Имена сессий в порядке загрузки (для распределения групп)."""
+        with self._state_lock:
+            return [a.session_name for a in self.accounts]
 
     def get_client(
         self, session_name: str, prefer_pool_for_read: bool = False
@@ -157,16 +175,22 @@ class InviteManager:
 
     async def join_group(self, link: str) -> tuple[bool, str | None]:
         """
-        Вступить в группу/канал по ссылке. Публичные и приватные (joinchat).
-        Возвращает (успех, session_name выбранного аккаунта).
+        Вступить в группу (аккаунт — least-used).
+        Возвращает (успех, session_name).
         """
         state = self.pool.get_best_account()
         if not state:
             return False, None
-        client = self.pool.get_client(state.session_name)
+        return await self.join_group_with_session(link, state.session_name)
+
+    async def join_group_with_session(self, link: str, session_name: str) -> tuple[bool, str | None]:
+        """
+        Вступить в группу с указанного аккаунта (для параллельных воркеров).
+        Публичные ссылки и joinchat.
+        """
+        client = self.pool.get_client(session_name)
         if not client:
-            return False, state.session_name
-        session_name = state.session_name
+            return False, session_name
         try:
             await client.connect()
             if not await client.is_user_authorized():
@@ -187,7 +211,7 @@ class InviteManager:
         except FloodWaitError as e:
             self.pool.mark_flood_wait(session_name, e.seconds)
             await asyncio.sleep(e.seconds)
-            return await self.join_group(link)
+            return await self.join_group_with_session(link, session_name)
         except Exception:
             return False, session_name
         finally:

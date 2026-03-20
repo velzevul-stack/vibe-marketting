@@ -2,6 +2,7 @@
 import asyncio
 import json
 import random
+from collections import defaultdict
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -255,8 +256,15 @@ async def _run_scrape() -> None:
     Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
 
 
+def _join_group_link(g: dict) -> str | None:
+    link = g.get("link") or g.get("id", "")
+    if not link or "t.me" not in str(link):
+        return None
+    return str(link).strip()
+
+
 async def _run_join_groups() -> None:
-    """Вступить в группы из found_groups.json."""
+    """Вступить в группы из found_groups.json — параллельно по аккаунтам, повтор на других при FAIL."""
     groups_path = Path("output") / "found_groups.json"
     if not groups_path.exists():
         console.print("[red]Нет found_groups.json. Сначала выполните поиск групп.[/]")
@@ -267,35 +275,91 @@ async def _run_join_groups() -> None:
         return
     count = int(Prompt.ask("Сколько групп обработать", default=str(min(10, len(groups)))))
     groups = groups[:count]
+    valid = [g for g in groups if _join_group_link(g)]
+    if not valid:
+        console.print("[red]Нет валидных ссылок t.me в выбранном списке.[/]")
+        return
+
     mgr = InviteManager()
     sett = mgr.settings
-    n_acc = len(mgr.pool.accounts)
+    session_names = mgr.pool.session_names_ordered()
+    if not session_names:
+        console.print("[red]Нет аккаунтов в accounts.json[/]")
+        return
+
+    n_acc = len(session_names)
     console.print(
         f"[dim]Аккаунтов: {n_acc}. "
-        f"Распределение: least-used (меньше действий сегодня → приоритет). "
-        f"Пауза между вступлениями: {sett.delay_join_min}–{sett.delay_join_max} сек (случайно).[/]\n"
+        f"Режим: группы делятся между аккаунтами (round-robin), все аккаунты работают [bold]параллельно[/]. "
+        f"После FAIL группа снова ставится на другой аккаунт (пока не исчерпаны). "
+        f"Пауза у каждого аккаунта между своими вступлениями: {sett.delay_join_min}–{sett.delay_join_max} сек.[/]\n"
     )
+
+    # (group_dict, frozenset уже пробовавших session_name)
+    pending: list[tuple[dict, frozenset]] = [(g, frozenset()) for g in valid]
     ok_count = 0
-    for i, g in enumerate(groups):
-        link = g.get("link") or g.get("id", "")
-        if not link or "t.me" not in str(link):
-            continue
-        title = g.get("title", "?")
-        console.print(f"  [{i+1}/{len(groups)}] {title}...")
-        try:
-            ok, session = await mgr.join_group(link)
-            who = session or "—"
-            if ok:
-                ok_count += 1
-                console.print(f"    [green]OK[/] [dim](аккаунт: {who})[/]")
-            else:
-                console.print(f"    [red]FAIL[/] [dim](аккаунт: {who})[/]")
-        except Exception as e:
-            console.print(f"    [red]Ошибка: {e}[/]")
-        delay = max(1, random.uniform(sett.delay_join_min, sett.delay_join_max))
-        console.print(f"    [dim]пауза {delay:.0f} сек…[/]")
-        await asyncio.sleep(delay)
-    console.print(f"\n[bold green]Вступили в {ok_count} из {len(groups)} групп[/]")
+    give_up: list[str] = []
+    max_rounds = max(50, len(valid) * (n_acc + 2))
+    round_no = 0
+
+    while pending and round_no < max_rounds:
+        round_no += 1
+        buckets: dict[str, list[tuple[dict, frozenset]]] = defaultdict(list)
+        for idx, (g, tried) in enumerate(pending):
+            candidates = [sn for sn in session_names if sn not in tried]
+            if not candidates:
+                title = (g.get("title") or "?")[:60]
+                give_up.append(title)
+                continue
+            sn = candidates[idx % len(candidates)]
+            buckets[sn].append((g, tried))
+
+        if not buckets:
+            break
+
+        console.print(f"[bold cyan]Раунд {round_no}[/] — параллельно аккаунтов: {len(buckets)}, групп в работе: {sum(len(v) for v in buckets.values())}")
+
+        async def _worker_join(sn: str, tasks: list[tuple[dict, frozenset]]) -> tuple[list[tuple[dict, frozenset]], int]:
+            fails_local: list[tuple[dict, frozenset]] = []
+            ok_local = 0
+            for g, tried in tasks:
+                link = _join_group_link(g)
+                if not link:
+                    continue
+                title = (g.get("title") or "?")[:55]
+                try:
+                    ok, _used = await mgr.join_group_with_session(link, sn)
+                except Exception as e:
+                    console.print(f"  [red]{sn}[/] {title}… [red]{e}[/]")
+                    fails_local.append((g, tried | {sn}))
+                    await asyncio.sleep(max(1, random.uniform(sett.delay_join_min, sett.delay_join_max)))
+                    continue
+                if ok:
+                    ok_local += 1
+                    console.print(f"  [green]OK[/] [dim]{sn}[/] — {title}[/]")
+                else:
+                    console.print(f"  [red]FAIL[/] [dim]{sn}[/] — {title}[/]")
+                    fails_local.append((g, tried | {sn}))
+                await asyncio.sleep(max(1, random.uniform(sett.delay_join_min, sett.delay_join_max)))
+            return fails_local, ok_local
+
+        results = await asyncio.gather(
+            *(_worker_join(sn, ts) for sn, ts in buckets.items())
+        )
+        pending = []
+        for fails_part, ok_part in results:
+            pending.extend(fails_part)
+            ok_count += ok_part
+
+    if round_no >= max_rounds and pending:
+        console.print(f"[yellow]Остановка по лимиту раундов ({max_rounds}), не обработано: {len(pending)}[/]")
+        for g, _ in pending[:15]:
+            give_up.append((g.get("title") or "?")[:50])
+
+    if give_up:
+        console.print(f"[dim]Без успеха (все аккаунты перепробованы или лимит): {len(give_up)}[/]")
+
+    console.print(f"\n[bold green]Успешных вступлений: {ok_count}[/] из {len(valid)} групп с валидной ссылкой")
     Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
 
 
