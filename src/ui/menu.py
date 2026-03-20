@@ -22,7 +22,7 @@ from src.config import (
     group_links_file_path,
     load_accounts,
     load_groups_from_links_txt,
-    load_proxies,
+    load_proxy_pool_from_config,
     mask_proxy_display,
 )
 from src.db import get_db
@@ -738,7 +738,7 @@ async def _run_invite() -> None:
 
 async def _run_check_proxies() -> None:
     """Проверить работоспособность прокси из пула."""
-    proxies = load_proxies()
+    proxies = load_proxy_pool_from_config()
     if not proxies:
         console.print("[red]Нет прокси. Добавьте в config/proxies.txt или settings.json[/]")
         Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
@@ -788,7 +788,7 @@ async def _run_check_proxies() -> None:
 def _run_assign_proxies() -> None:
     """Назначить прокси из пула аккаунтам (перестроить под TG-аккаунты)."""
     accounts = load_accounts()
-    proxies = load_proxies()
+    proxies = load_proxy_pool_from_config()
     if not accounts:
         console.print("[red]Нет аккаунтов в config/accounts.json[/]")
         return

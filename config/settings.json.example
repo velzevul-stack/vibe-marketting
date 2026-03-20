@@ -17,6 +17,8 @@
   "bulk_2fa_password": "",
   "bulk_prepare_delay_sec": 5,
   "assign_proxies_on_startup": false,
+  "_proxy_enabled_comment": "false — не использовать прокси в поиске и Telethon (можно переключать: python main.py --proxy on|off)",
+  "proxy_enabled": true,
   "sync_sessions_on_startup": true,
 
   "telethon_default_api": {

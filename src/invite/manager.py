@@ -16,9 +16,10 @@ from telethon.tl.functions.channels import InviteToChannelRequest, JoinChannelRe
 from telethon.tl.functions.messages import ImportChatInviteRequest
 
 from src.config import (
+    is_placeholder_proxy_url,
+    is_proxy_enabled,
     load_accounts,
     load_proxies,
-    is_placeholder_proxy_url,
     proxy_url_to_telethon,
     Settings,
     telethon_session_file,
@@ -123,14 +124,15 @@ class AccountPool:
             return None
         session_path = telethon_session_file(session_name)
         proxy = None
-        if prefer_pool_for_read and self._proxy_pool:
-            proxy = self._get_next_proxy()
-        if not proxy:
-            proxy = acc.get("proxy")
-        if is_placeholder_proxy_url(proxy):
-            proxy = None
-        if not proxy and self._proxy_pool:
-            proxy = self._get_next_proxy()
+        if is_proxy_enabled():
+            if prefer_pool_for_read and self._proxy_pool:
+                proxy = self._get_next_proxy()
+            if not proxy:
+                proxy = acc.get("proxy")
+            if is_placeholder_proxy_url(proxy):
+                proxy = None
+            if not proxy and self._proxy_pool:
+                proxy = self._get_next_proxy()
         proxy_tg = proxy_url_to_telethon(proxy)
         return TelegramClient(
             str(session_path),

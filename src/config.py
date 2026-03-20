@@ -9,6 +9,11 @@ def _config_dir() -> Path:
     return Path(__file__).parent.parent / "config"
 
 
+def settings_json_path() -> Path:
+    """Путь к config/settings.json."""
+    return _config_dir() / "settings.json"
+
+
 def _load_settings() -> dict:
     """Загрузить settings.json."""
     path = _config_dir() / "settings.json"
@@ -16,6 +21,39 @@ def _load_settings() -> dict:
         return {}
     data = json.loads(path.read_text(encoding="utf-8"))
     return {k: v for k, v in (data or {}).items() if not k.startswith("_")}
+
+
+def is_proxy_enabled() -> bool:
+    """Использовать ли прокси в рантайме (поиск, клиенты Telethon)."""
+    return bool(_load_settings().get("proxy_enabled", True))
+
+
+def set_proxy_enabled(enabled: bool) -> tuple[bool, str]:
+    """
+    Записать ``proxy_enabled`` в config/settings.json.
+    Сохраняет остальные ключи файла; при отсутствии файла создаёт минимальный JSON.
+    """
+    path = settings_json_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        try:
+            raw = path.read_text(encoding="utf-8-sig").strip()
+            data = json.loads(raw) if raw else {}
+        except (OSError, json.JSONDecodeError) as e:
+            return False, f"Не удалось прочитать settings.json: {e}"
+        if not isinstance(data, dict):
+            return False, "settings.json: корень должен быть объектом JSON"
+    else:
+        data = {}
+    data["proxy_enabled"] = bool(enabled)
+    try:
+        path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as e:
+        return False, f"Не удалось записать settings.json: {e}"
+    return True, str(path)
 
 
 class Settings:
@@ -61,6 +99,8 @@ class Settings:
         self.assign_proxies_on_startup: bool = bool(
             self._data.get("assign_proxies_on_startup", False)
         )
+        # False — не использовать прокси ни из пула, ни из accounts.json (поиск, Telethon)
+        self.proxy_enabled: bool = bool(self._data.get("proxy_enabled", True))
         # Дефолтные api для автопривязки .session → accounts.json (меню сессий, п.4)
         tda = self._data.get("telethon_default_api") or {}
         self.default_telethon_api_id: int | None = None
@@ -108,7 +148,7 @@ def assign_proxies_round_robin_to_accounts(
     Дополнительно: если есть ``sessions/<имя>.json``, в него пишется то же поле ``proxy``.
     """
     s = settings or Settings()
-    proxies = load_proxies()
+    proxies = load_proxy_pool_from_config()
     if not proxies:
         return False, "Нет прокси в пуле (proxies.txt / settings.json)"
     all_rows = load_accounts_all()
@@ -393,8 +433,11 @@ def _read_proxy_file(filepath: Path) -> list[str]:
     return out
 
 
-def load_proxies() -> list[str]:
-    """Загрузить прокси из settings.json (files или list) или из proxies.txt по умолчанию."""
+def load_proxy_pool_from_config() -> list[str]:
+    """
+    Список прокси из settings.json (files / list) и proxies.txt.
+    Не учитывает ``proxy_enabled`` — для назначения аккаунтам и проверки пула.
+    """
     config_dir = _config_dir()
     settings = _load_settings()
     proxies_cfg = settings.get("proxies", {})
@@ -423,6 +466,13 @@ def load_proxies() -> list[str]:
         result = _read_proxy_file(path)
 
     return result
+
+
+def load_proxies() -> list[str]:
+    """Прокси для рантайма: пустой список, если в settings ``proxy_enabled: false``."""
+    if not is_proxy_enabled():
+        return []
+    return load_proxy_pool_from_config()
 
 
 def mask_proxy_display(proxy: str | None) -> str:

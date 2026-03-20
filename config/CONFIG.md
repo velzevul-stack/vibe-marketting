@@ -14,6 +14,12 @@
 - Или меню **8** → **1** (с подтверждением).
 - Или в `settings.json`: `"assign_proxies_on_startup": true` — при **каждом** запуске меню прокси перезапишутся из пула; после настройки верните `false`.
 
+### Временно без прокси (поиск и Telegram)
+
+- Команда: `python main.py --proxy off` — в `settings.json` выставляется `"proxy_enabled": false` (прямые соединения; поля `proxy` в `accounts.json` не стираются).
+- Включить снова: `python main.py --proxy on`.
+- Текущее значение: `python main.py --proxy status`.
+
 ---
 
 ## 1. settings.json

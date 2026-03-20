@@ -39,16 +39,43 @@ def _run_startup_session_sync() -> None:
         con.print(f"[red]sync_sessions: {e}[/]")
 
 
+def _cli_proxy_state(state: str) -> int:
+    """Включить/выключить прокси в settings.json или показать статус."""
+    from rich.console import Console
+    from src.config import is_proxy_enabled, set_proxy_enabled
+
+    con = Console()
+    if state == "status":
+        con.print(
+            f"[bold]proxy_enabled:[/] [cyan]{is_proxy_enabled()}[/] "
+            "(см. config/settings.json)"
+        )
+        return 0
+    ok, msg = set_proxy_enabled(state == "on")
+    if ok:
+        con.print(
+            f"[green]Прокси {'включены' if state == 'on' else 'выключены'}:[/] "
+            f"[dim]{msg}[/] → [bold]proxy_enabled[/] = {state == 'on'}"
+        )
+        return 0
+    con.print(f"[red]{msg}[/]")
+    return 1
+
+
 def _cli_assign_proxies_only() -> int:
     """Только перезаписать proxy в accounts.json из пула (без меню)."""
     from rich.console import Console
-    from src.config import assign_proxies_round_robin_to_accounts, load_accounts, load_proxies
+    from src.config import (
+        assign_proxies_round_robin_to_accounts,
+        load_accounts,
+        load_proxy_pool_from_config,
+    )
 
     con = Console()
     if not load_accounts():
         con.print("[red]Нет аккаунтов в config/accounts.json[/]")
         return 1
-    if not load_proxies():
+    if not load_proxy_pool_from_config():
         con.print("[red]Нет прокси в пуле[/]")
         return 1
     ok, msg = assign_proxies_round_robin_to_accounts()
@@ -68,10 +95,19 @@ def main() -> None:
             "Примеры:\n"
             "  python main.py                  интерактивное меню\n"
             "  python main.py --assign-proxies назначить прокси из пула в accounts.json и выйти\n"
+            "  python main.py --proxy off      не использовать прокси (поиск, Telethon)\n"
+            "  python main.py --proxy on       снова использовать прокси из конфига\n"
+            "  python main.py --proxy status   текущее значение proxy_enabled\n"
             "\n"
             "Справка по конфигу: config/CONFIG.md, docs/PROXY_AND_ACCOUNTS.md"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--proxy",
+        metavar="STATE",
+        choices=["on", "off", "status"],
+        help="Вкл/выкл использование прокси (ключ proxy_enabled в settings.json); status — только вывод",
     )
     parser.add_argument(
         "--assign-proxies",
@@ -79,6 +115,8 @@ def main() -> None:
         help="Перезаписать proxy у всех аккаунтов из пула (proxies.txt / settings) и выйти",
     )
     args = parser.parse_args()
+    if args.proxy is not None:
+        raise SystemExit(_cli_proxy_state(args.proxy))
     if args.assign_proxies:
         _run_startup_session_sync()
         raise SystemExit(_cli_assign_proxies_only())

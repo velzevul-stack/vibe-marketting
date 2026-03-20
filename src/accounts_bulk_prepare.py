@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 import random
 
-from rich.prompt import Confirm
+from rich.prompt import Confirm, Prompt
 from telethon import TelegramClient
 from telethon.tl.functions.account import GetPasswordRequest
 from telethon.tl.functions.auth import ResetAuthorizationsRequest
@@ -17,8 +17,9 @@ from src.config import (
     assign_proxies_round_robin_to_accounts,
     effective_2fa_password,
     is_placeholder_proxy_url,
+    is_proxy_enabled,
     load_accounts,
-    load_proxies,
+    load_proxy_pool_from_config,
     proxy_url_to_telethon,
     telethon_session_file,
 )
@@ -58,8 +59,8 @@ async def run_bulk_account_prepare(console) -> None:
         console.print("[red]Пустой пароль — отмена[/]")
         return
 
-    proxies = load_proxies()
-    if not proxies:
+    pool = load_proxy_pool_from_config()
+    if not pool:
         console.print("[yellow]В пуле нет прокси — шаг 3 выполнить не получится.[/]")
 
     console.print(
@@ -119,13 +120,15 @@ async def run_bulk_account_prepare(console) -> None:
     for acc in accounts:
         name = acc.get("session_name", "?")
         path = telethon_session_file(name, settings)
-        proxy = acc.get("proxy")
-        if is_placeholder_proxy_url(proxy):
-            proxy = None
+        proxy = None
+        if is_proxy_enabled():
+            proxy = acc.get("proxy")
+            if is_placeholder_proxy_url(proxy):
+                proxy = None
         if not path.is_file():
             console.print(f"  [yellow]{name}: нет файла сессии — пропуск[/]")
             continue
-        if not proxy:
+        if is_proxy_enabled() and not proxy:
             console.print(f"  [yellow]{name}: нет proxy в JSON — пропуск сброса[/]")
             continue
         client = _client_for(acc, proxy=proxy, settings=settings)

@@ -10,14 +10,18 @@ from pathlib import Path
 # Добавить корень проекта
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.config import assign_proxies_round_robin_to_accounts, load_accounts, load_proxies
+from src.config import (
+    assign_proxies_round_robin_to_accounts,
+    load_accounts,
+    load_proxy_pool_from_config,
+)
 
 
 def main() -> None:
     if not load_accounts():
         print("Нет аккаунтов в config/accounts.json")
         return
-    if not load_proxies():
+    if not load_proxy_pool_from_config():
         print("Нет прокси. Добавьте в config/proxies.txt или settings.json")
         return
 
