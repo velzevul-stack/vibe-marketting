@@ -12,6 +12,7 @@ from src.config import (
     load_exclude_keywords,
     load_cities,
     load_manual_groups,
+    mask_proxy_display,
     russian_cities_blocklist_effective,
     ProxyPool,
     Settings,
@@ -392,7 +393,8 @@ async def search_groups(
     Города из data/russian_cities_blocklist.json не участвуют в запросах и отсекаются в выдаче
     (если exclude_russian_cities_in_search в settings). После сбора — filter_vape_groups
     и filter_exclude_russian_city_groups.
-    on_progress(source, query, current, total, found, proxy_info) — вызывается при прогрессе.
+    on_progress(source, query, current, total, found, proxy_info, worker_note="") — при прогрессе;
+    worker_note — краткий статус параллельных воркеров (если включён параллельный режим).
     """
     all_groups: dict[str, dict] = {}
     pool = proxy_pool or ProxyPool()
@@ -406,14 +408,21 @@ async def search_groups(
             if key and key not in all_groups:
                 all_groups[key] = g
 
-    def _report(source: str, query: str, cur: int, total: int, proxy_info: str = "") -> None:
+    def _report(
+        source: str,
+        query: str,
+        cur: int,
+        total: int,
+        proxy_info: str = "",
+        worker_note: str = "",
+    ) -> None:
         if on_progress:
-            on_progress(source, query, cur, total, len(all_groups), proxy_info)
+            on_progress(source, query, cur, total, len(all_groups), proxy_info, worker_note)
 
     # Ручной список
     _add_groups(load_manual_groups_as_list())
     if on_progress:
-        on_progress("manual", "groups.txt", 1, 1, len(all_groups), "")
+        on_progress("manual", "groups.txt", 1, 1, len(all_groups), "", "")
 
     keywords = load_keywords()
     themes = keywords.get("search_themes", ["vape барахолка", "вейп барахолка", "парилка"])
@@ -432,17 +441,65 @@ async def search_groups(
         queries: list[str],
         search_fn,
     ) -> None:
+        """
+        Параллельно: по одному asyncio-воркеру на каждый прокси из пула (фиксированный прокси у воркера).
+        Очередь запросов общая; задержка search_min–search_max после каждого запроса — у своего воркера.
+        Без прокси — один последовательный поток (как раньше).
+        """
         total = len(queries)
+        if total == 0:
+            return
         search_min = getattr(settings, "delay_search_min", 2.0)
         search_max = getattr(settings, "delay_search_max", 6.0)
-        for i, q in enumerate(queries):
-            proxy, proxy_info = pool.get_next_with_info() if pool.proxies else (None, "—")
-            grp = await search_fn(q, proxy)
-            _add_groups(grp)
-            _report(source, q, i + 1, total, proxy_info)
-            if i < total - 1:
-                delay = random.uniform(search_min, search_max)
-                await asyncio.sleep(delay)
+        proxies_list: list[str | None] = list(pool.proxies) if pool.proxies else []
+
+        if len(proxies_list) <= 1:
+            proxy_fixed = proxies_list[0] if proxies_list else None
+            disp = mask_proxy_display(proxy_fixed) if proxy_fixed else "—"
+            for i, q in enumerate(queries):
+                grp = await search_fn(q, proxy_fixed)
+                _add_groups(grp)
+                proxy_info = f"1/1 → {disp}" if proxy_fixed else "—"
+                note = "Один поток (нет пула прокси или один прокси)"
+                _report(source, q, i + 1, total, proxy_info, note)
+                if i < total - 1:
+                    await asyncio.sleep(random.uniform(search_min, search_max))
+            return
+
+        n_workers = len(proxies_list)
+        idx_lock = asyncio.Lock()
+        state_lock = asyncio.Lock()
+        next_i = 0
+        done_count = 0
+
+        async def worker(worker_id: int) -> None:
+            nonlocal next_i, done_count
+            proxy = proxies_list[worker_id]
+            disp = mask_proxy_display(proxy) if proxy else "—"
+            while True:
+                async with idx_lock:
+                    if next_i >= total:
+                        return
+                    qi = next_i
+                    next_i += 1
+                    q = queries[qi]
+                try:
+                    grp = await search_fn(q, proxy)
+                except Exception:
+                    grp = []
+                async with state_lock:
+                    _add_groups(grp)
+                    done_count += 1
+                    cur_done = done_count
+                    n_found = len(all_groups)
+                proxy_info = f"W{worker_id + 1}/{n_workers} → {disp}"
+                worker_note = (
+                    f"Параллельно {n_workers} воркеров (по прокси) · готово {cur_done}/{total} · в базе {n_found}"
+                )
+                _report(source, q, cur_done, total, proxy_info, worker_note)
+                await asyncio.sleep(random.uniform(search_min, search_max))
+
+        await asyncio.gather(*(worker(w) for w in range(n_workers)))
 
     # Telegram Index (RapidAPI) — только тема × город из cities_by.json
     if api_key:

@@ -272,7 +272,15 @@ async def _run_search() -> None:
     )
     console.print()
 
-    progress_state = {"source": "", "query": "", "cur": 0, "total": 1, "found": 0, "proxy": ""}
+    progress_state = {
+        "source": "",
+        "query": "",
+        "cur": 0,
+        "total": 1,
+        "found": 0,
+        "proxy": "",
+        "worker_note": "",
+    }
     live_ref: list = []
 
     def make_panel() -> Panel:
@@ -282,21 +290,40 @@ async def _run_search() -> None:
         tot = progress_state["total"]
         found = progress_state["found"]
         proxy = progress_state["proxy"]
+        note = progress_state.get("worker_note") or ""
         pct = (cur / tot * 100) if tot else 0
         bar = "█" * int(pct / 5) + "░" * (20 - int(pct / 5))
-        proxy_line = f"[dim]Прокси:[/] [yellow]{proxy}[/]\n" if proxy else ""
+        proxy_line = f"[dim]Прокси:[/] [yellow]{escape(str(proxy))}[/]\n" if proxy else ""
+        note_line = f"[dim]{escape(note)}[/]\n" if note else ""
         return Panel(
-            f"[cyan]{src}[/]\n"
-            f"[dim]Запрос:[/] {q[:60]}{'...' if len(q) > 60 else ''}\n"
+            f"[cyan]{escape(str(src))}[/]\n"
+            f"[dim]Запрос:[/] {escape(q[:60])}{'...' if len(q) > 60 else ''}\n"
             f"{proxy_line}"
+            f"{note_line}"
             f"[green][{bar}][/] {cur}/{tot} ({pct:.0f}%)\n"
             f"[bold]Найдено групп:[/] [green]{found}[/]",
             title="[bold]Поиск[/]",
             border_style="blue",
         )
 
-    def on_progress(source: str, query: str, cur: int, total: int, found: int, proxy_info: str = "") -> None:
-        progress_state.update(source=source, query=query, cur=cur, total=total, found=found, proxy=proxy_info)
+    def on_progress(
+        source: str,
+        query: str,
+        cur: int,
+        total: int,
+        found: int,
+        proxy_info: str = "",
+        worker_note: str = "",
+    ) -> None:
+        progress_state.update(
+            source=source,
+            query=query,
+            cur=cur,
+            total=total,
+            found=found,
+            proxy=proxy_info,
+            worker_note=worker_note,
+        )
         if live_ref:
             live_ref[0].update(make_panel())
 
