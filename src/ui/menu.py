@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 from rich.console import Console
 from rich.live import Live
+from rich.markup import escape
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich.table import Table
@@ -134,7 +135,7 @@ def _run_proxy_session_submenu() -> None:
         except KeyboardInterrupt:
             console.print("\n[yellow]Прервано.[/]")
         except Exception as e:
-            console.print(f"[red]Ошибка: {e}[/]")
+            console.print(f"[red]Ошибка: {escape(str(e))}[/]")
 
 
 async def _run_search() -> None:
@@ -238,12 +239,12 @@ async def _run_scrape() -> None:
             try:
                 def on_progress(cur, tot):
                     pct = (cur / tot * 100) if tot else 0
-                    console.print(f"  [dim]{title}: {cur}/{tot} ({pct:.1f}%)[/]", end="\r")
+                    console.print(f"  [dim]{escape(str(title))}: {cur}/{tot} ({pct:.1f}%)[/]", end="\r")
                 hot, warm = await scrape_group(link, limit=limit, pool=pool, on_progress=on_progress)
-                console.print(f"  [green]{title}: {hot} горячих, {warm} тёплых[/]")
+                console.print(f"  [green]{escape(str(title))}: {hot} горячих, {warm} тёплых[/]")
                 return hot, warm
             except Exception as e:
-                console.print(f"  [red]{title}: Ошибка {e}[/]")
+                console.print(f"  [red]{escape(str(title))}: Ошибка {escape(str(e))}[/]")
                 return 0, 0
             finally:
                 await asyncio.sleep(2)
@@ -330,15 +331,15 @@ async def _run_join_groups() -> None:
                 try:
                     ok, _used = await mgr.join_group_with_session(link, sn)
                 except Exception as e:
-                    console.print(f"  [red]{sn}[/] {title}… [red]{e}[/]")
+                    console.print(f"  [red]{escape(str(sn))}[/] {escape(str(title))}… [red]{escape(str(e))}[/]")
                     fails_local.append((g, tried | {sn}))
                     await asyncio.sleep(max(1, random.uniform(sett.delay_join_min, sett.delay_join_max)))
                     continue
                 if ok:
                     ok_local += 1
-                    console.print(f"  [green]OK[/] [dim]{sn}[/] — {title}[/]")
+                    console.print(f"  [green]OK[/] [dim]{escape(str(sn))}[/] — {escape(str(title))}[/]")
                 else:
-                    console.print(f"  [red]FAIL[/] [dim]{sn}[/] — {title}[/]")
+                    console.print(f"  [red]FAIL[/] [dim]{escape(str(sn))}[/] — {escape(str(title))}[/]")
                     fails_local.append((g, tried | {sn}))
                 await asyncio.sleep(max(1, random.uniform(sett.delay_join_min, sett.delay_join_max)))
             return fails_local, ok_local
@@ -533,7 +534,7 @@ def _run_view_groups() -> None:
     try:
         groups = json.loads(found_path.read_text(encoding="utf-8"))
     except Exception as e:
-        console.print(f"[red]Ошибка чтения: {e}[/]")
+        console.print(f"[red]Ошибка чтения: {escape(str(e))}[/]")
         return
     if not isinstance(groups, list) or not groups:
         console.print("[yellow]Список групп пуст.[/]")
@@ -570,11 +571,11 @@ def run_menu() -> None:
                     f"аккаунт(ов) → accounts.json (из папки сессий + .json)"
                 )
             for w in warns[:12]:
-                console.print(f"[dim]sync_sessions:[/] [yellow]{w}[/]")
+                console.print(f"[dim]sync_sessions:[/] [yellow]{escape(str(w))}[/]")
             if len(warns) > 12:
                 console.print(f"[dim]… ещё предупреждений: {len(warns) - 12}[/]")
         except Exception as e:
-            console.print(f"[red]sync_sessions_on_startup: {e}[/]")
+            console.print(f"[red]sync_sessions_on_startup: {escape(str(e))}[/]")
         console.print()
 
     if _sett.assign_proxies_on_startup:
@@ -609,5 +610,5 @@ def run_menu() -> None:
         except KeyboardInterrupt:
             console.print("\n[yellow]Прервано.[/]")
         except Exception as e:
-            console.print(f"[red]Ошибка: {e}[/]")
+            console.print(f"[red]Ошибка: {escape(str(e))}[/]")
         console.print()
