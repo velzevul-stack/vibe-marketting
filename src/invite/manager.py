@@ -1,5 +1,6 @@
 """Умное распределение аккаунтов и приглашения."""
 import asyncio
+import errno
 import random
 import re
 import threading
@@ -154,6 +155,47 @@ def _join_error_message(exc: BaseException) -> str:
     return text if len(text) <= 280 else text[:277] + "..."
 
 
+def _is_transient_connection_error(exc: BaseException) -> bool:
+    """
+    Обрыв на прокси / сети (часто: «Server closed the connection: 0 bytes read…»).
+    Имеет смысл повторить попытку с новым подключением.
+    """
+    if isinstance(exc, (ConnectionError, asyncio.TimeoutError, BrokenPipeError)):
+        return True
+    if type(exc).__name__ == "IncompleteReadError":
+        return True
+    if isinstance(exc, OSError):
+        code = getattr(exc, "errno", None)
+        if code in (
+            errno.ECONNRESET,
+            errno.ECONNABORTED,
+            errno.ETIMEDOUT,
+            errno.EPIPE,
+            errno.ENETUNREACH,
+        ):
+            return True
+    low = str(exc).lower()
+    needles = (
+        "server closed the connection",
+        "0 bytes read",
+        "bytes read on a total of",
+        "connection reset",
+        "connection aborted",
+        "broken pipe",
+        "unexpected eof",
+        "eof",
+        "timed out",
+        "timeout",
+        "ssl",
+        "network is unreachable",
+        "temporarily unavailable",
+    )
+    return any(n in low for n in needles)
+
+
+_JOIN_TRANSIENT_RETRIES = 3
+
+
 class InviteManager:
     """Управление приглашениями с умным распределением."""
 
@@ -208,46 +250,64 @@ class InviteManager:
         Вступить в группу с указанного аккаунта (для параллельных воркеров).
         Публичные ссылки и joinchat.
         Возвращает (успех, session_name, причина_ошибки — пустая строка при успехе).
+        При обрыве соединения (прокси/сеть) — до _JOIN_TRANSIENT_RETRIES попыток с паузой.
         """
-        client = self.pool.get_client(session_name)
-        if not client:
-            return (
-                False,
-                session_name,
-                "Нет клиента: проверьте api_id, api_hash и session_name в accounts.json",
-            )
-        try:
-            await client.connect()
-            if not await client.is_user_authorized():
+        link_clean = (link or "").strip()
+        last_err = ""
+
+        for attempt in range(_JOIN_TRANSIENT_RETRIES):
+            client = self.pool.get_client(session_name)
+            if not client:
                 return (
                     False,
                     session_name,
-                    "Сессия не авторизована — войдите через меню «Сессии Telethon»",
+                    "Нет клиента: проверьте api_id, api_hash и session_name в accounts.json",
                 )
-            link = (link or "").strip()
-            if "joinchat/" in link.lower():
-                match = re.search(r"joinchat/([a-zA-Z0-9_-]+)", link, re.I)
-                if match:
-                    hash_part = match.group(1)
-                    await client(ImportChatInviteRequest(hash_part))
+            try:
+                await client.connect()
+                if not await client.is_user_authorized():
+                    return (
+                        False,
+                        session_name,
+                        "Сессия не авторизована — войдите через меню «Сессии Telethon»",
+                    )
+                if "joinchat/" in link_clean.lower():
+                    match = re.search(r"joinchat/([a-zA-Z0-9_-]+)", link_clean, re.I)
+                    if match:
+                        hash_part = match.group(1)
+                        await client(ImportChatInviteRequest(hash_part))
+                    else:
+                        return False, session_name, "Некорректная ссылка joinchat/…"
                 else:
-                    return False, session_name, "Некорректная ссылка joinchat/…"
-            else:
-                entity = await client.get_entity(link)
-                await client(JoinChannelRequest(entity))
-            self.pool.mark_used(session_name)
-            return True, session_name, ""
-        except UserAlreadyParticipantError:
-            self.pool.mark_used(session_name)
-            return True, session_name, ""
-        except FloodWaitError as e:
-            self.pool.mark_flood_wait(session_name, e.seconds)
-            await asyncio.sleep(e.seconds)
-            return await self.join_group_with_session(link, session_name)
-        except Exception as e:
-            return False, session_name, _join_error_message(e)
-        finally:
-            await client.disconnect()
+                    entity = await client.get_entity(link_clean)
+                    await client(JoinChannelRequest(entity))
+                self.pool.mark_used(session_name)
+                return True, session_name, ""
+            except UserAlreadyParticipantError:
+                self.pool.mark_used(session_name)
+                return True, session_name, ""
+            except FloodWaitError as e:
+                self.pool.mark_flood_wait(session_name, e.seconds)
+                await asyncio.sleep(e.seconds)
+                return await self.join_group_with_session(link_clean, session_name)
+            except Exception as e:
+                last_err = _join_error_message(e)
+                transient = (
+                    attempt < _JOIN_TRANSIENT_RETRIES - 1
+                    and _is_transient_connection_error(e)
+                )
+                if transient:
+                    delay = 1.5 + (attempt + 1) * 1.2 + random.uniform(0.3, 1.2)
+                    await asyncio.sleep(delay)
+                else:
+                    return False, session_name, last_err
+            finally:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+
+        return False, session_name, last_err or "Не удалось вступить после повторов"
 
     async def invite_contacts_to_channel(
         self, channel_username: str, limit: int = 50, batch_size: int = 10

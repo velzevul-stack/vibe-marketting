@@ -289,19 +289,28 @@ async def _run_join_groups() -> None:
         return
 
     n_acc = len(session_names)
+    n_groups = len(valid)
+    max_rounds = max(50, n_groups * (n_acc + 2))
     console.print(
         f"[dim]Аккаунтов: {n_acc}. "
         f"Режим: группы делятся между аккаунтами (round-robin), все аккаунты работают [bold]параллельно[/]. "
         f"После FAIL группа снова ставится на другой аккаунт (пока не исчерпаны). "
-        f"Пауза у каждого аккаунта между своими вступлениями: {sett.delay_join_min}–{sett.delay_join_max} сек.[/]\n"
+        f"Пауза у каждого аккаунта между своими вступлениями: {sett.delay_join_min}–{sett.delay_join_max} сек.[/]"
+    )
+    console.print(
+        f"[dim]К обработке: [bold]{n_groups}[/] групп с ссылкой t.me; лимит раундов: {max_rounds}.[/]\n"
     )
 
     # (group_dict, frozenset уже пробовавших session_name)
     pending: list[tuple[dict, frozenset]] = [(g, frozenset()) for g in valid]
     ok_count = 0
     give_up: list[str] = []
-    max_rounds = max(50, len(valid) * (n_acc + 2))
     round_no = 0
+    log_lock = asyncio.Lock()
+
+    async def _log_line(msg: str) -> None:
+        async with log_lock:
+            console.print(msg)
 
     while pending and round_no < max_rounds:
         round_no += 1
@@ -318,31 +327,66 @@ async def _run_join_groups() -> None:
         if not buckets:
             break
 
-        console.print(f"[bold cyan]Раунд {round_no}[/] — параллельно аккаунтов: {len(buckets)}, групп в работе: {sum(len(v) for v in buckets.values())}")
+        in_round = sum(len(v) for v in buckets.values())
+        await _log_line(
+            f"\n[bold cyan]━━ Раунд {round_no} ━━[/] "
+            f"[dim]в очереди было групп:[/] [white]{len(pending)}[/] · "
+            f"[dim]назначено в этом раунде:[/] [white]{in_round}[/] · "
+            f"[dim]аккаунтов параллельно:[/] [white]{len(buckets)}[/]"
+        )
+        await _log_line(
+            "[dim]Шаг 1:[/] распределение — каждой группе выбран аккаунт (ещё не пробовавший её); "
+            "ниже по строкам на аккаунт — сколько у него вступлений в этом раунде."
+        )
+        dist_parts = [
+            f"[yellow]{escape(str(sn))}[/][dim]: {len(ts)} шт.[/]"
+            for sn, ts in sorted(buckets.items(), key=lambda x: x[0])
+        ]
+        await _log_line("  " + " · ".join(dist_parts))
+        await _log_line(
+            f"[dim]Шаг 2:[/] параллельный запуск — у каждого аккаунта своя очередь вступлений "
+            f"([bold]по очереди[/] внутри аккаунта, между ними пауза {sett.delay_join_min}–{sett.delay_join_max} с).[/]"
+        )
 
         async def _worker_join(sn: str, tasks: list[tuple[dict, frozenset]]) -> tuple[list[tuple[dict, frozenset]], int]:
             fails_local: list[tuple[dict, frozenset]] = []
             ok_local = 0
-            for g, tried in tasks:
+            total_sn = len(tasks)
+            for k, (g, tried) in enumerate(tasks, start=1):
                 link = _join_group_link(g)
                 if not link:
                     continue
                 title = (g.get("title") or "?")[:55]
+                await _log_line(
+                    f"  [cyan]▶[/] [dim]{escape(str(sn))}[/] [dim]({k}/{total_sn})[/] "
+                    f"[white]вступаю в группу[/] — [dim]{escape(str(title))}[/]"
+                )
                 try:
                     ok, _used, fail_reason = await mgr.join_group_with_session(link, sn)
                 except Exception as e:
-                    console.print(f"  [red]{escape(str(sn))}[/] {escape(str(title))}… [red]{escape(str(e))}[/]")
+                    await _log_line(
+                        f"    [red]✗ исключение[/] [dim]{escape(str(sn))}[/] — {escape(str(title))}: "
+                        f"[red]{escape(str(e))}[/]"
+                    )
                     fails_local.append((g, tried | {sn}))
                     await asyncio.sleep(max(1, random.uniform(sett.delay_join_min, sett.delay_join_max)))
                     continue
                 if ok:
                     ok_local += 1
-                    console.print(f"  [green]OK[/] [dim]{escape(str(sn))} — {escape(str(title))}[/]")
+                    await _log_line(
+                        f"    [green]✓ OK[/] [dim]{escape(str(sn))}[/] — {escape(str(title))}[/]"
+                    )
                 else:
-                    console.print(f"  [red]FAIL[/] [dim]{escape(str(sn))} — {escape(str(title))}[/]")
+                    await _log_line(
+                        f"    [red]✗ FAIL[/] [dim]{escape(str(sn))}[/] — {escape(str(title))}[/]"
+                    )
                     if fail_reason:
-                        console.print(f"      [dim]{escape(fail_reason)}[/]")
+                        await _log_line(f"      [dim]{escape(fail_reason)}[/]")
                     fails_local.append((g, tried | {sn}))
+                if k < total_sn:
+                    await _log_line(
+                        f"    [dim]пауза {sett.delay_join_min}–{sett.delay_join_max} с (этот аккаунт)…[/]"
+                    )
                 await asyncio.sleep(max(1, random.uniform(sett.delay_join_min, sett.delay_join_max)))
             return fails_local, ok_local
 
@@ -350,9 +394,22 @@ async def _run_join_groups() -> None:
             *(_worker_join(sn, ts) for sn, ts in buckets.items())
         )
         pending = []
+        round_ok = 0
+        round_retry = 0
         for fails_part, ok_part in results:
             pending.extend(fails_part)
             ok_count += ok_part
+            round_ok += ok_part
+            round_retry += len(fails_part)
+        retry_msg = (
+            f" · [yellow]{round_retry} групп — повтор в следующем раунде с другими аккаунтами[/]"
+            if round_retry
+            else ""
+        )
+        await _log_line(
+            f"[bold cyan]Раунд {round_no} завершён:[/] [green]+{round_ok} успешных[/]{retry_msg}"
+            f" · [dim]в очереди сейчас:[/] [white]{len(pending)}[/]"
+        )
 
     if round_no >= max_rounds and pending:
         console.print(f"[yellow]Остановка по лимиту раундов ({max_rounds}), не обработано: {len(pending)}[/]")
