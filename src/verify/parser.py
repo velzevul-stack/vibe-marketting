@@ -26,13 +26,16 @@ def _count_matches(text: str, keywords: list[str]) -> list[str]:
 
 
 def _has_table(text: str) -> bool:
-    """Проверить наличие таблицы/Google Sheets."""
+    """Проверить признаки прайса/таблицы (категория hot)."""
     if not text:
         return False
     t = text.lower()
     if "docs.google.com/spreadsheets" in t:
         return True
-    if "таблица" in t and ("онлайн" in t or "наличи" in t or "ассортимент" in t):
+    # таблица / в таблице / таблицу / гугл-таблица
+    if "таблиц" in t:
+        return True
+    if "оформить заказ" in t or "оформление заказа" in t or "заказ оформить" in t:
         return True
     return False
 
