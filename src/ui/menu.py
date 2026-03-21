@@ -285,9 +285,9 @@ def _prompt_groups_list_source(action_title: str) -> list[dict] | None:
     return merged
 
 
-def _mi(label: str) -> str:
-    """Пункт меню для Rich: [[n]] → отображается как [n] (одинарные [ — разметка Rich)."""
-    return f"[[{label}]]"
+def _mk(key: str) -> str:
+    """Клавиша пункта меню (цифра или буква): единый вид [key] в Rich."""
+    return f"[[{key}]]"
 
 
 def _load_telegram_index_key() -> str | None:
@@ -326,7 +326,7 @@ def _load_header_art() -> str:
 
 
 def _render_main_menu() -> str:
-    """Главное меню."""
+    """Главное меню: пункты 1–9 по порядку, затем a, b; 0 — выход."""
     header = _load_header_art()
     try:
         console.print(Panel.fit(header, border_style="cyan"))
@@ -336,39 +336,37 @@ def _render_main_menu() -> str:
             border_style="cyan",
         ))
     console.print()
-    console.print("[bold]Данные и поиск[/]")
-    console.print(f"{_mi('1')} Поиск групп")
-    console.print(f"{_mi('7')} Просмотр найденных групп [dim](output/found_groups.json)[/]")
-    console.print(f"{_mi('6')} Статистика базы")
+    console.print("[bold white]── Данные ──[/]")
+    console.print(f"{_mk('1')} Поиск групп")
+    console.print(f"{_mk('2')} Просмотр найденных групп [dim](output/found_groups.json)[/]")
+    console.print(f"{_mk('3')} Статистика базы")
     console.print(
-        "[cyan]b[/]  База пользователей ([dim]SQLite users[/]): поиск по username, просмотр порциями"
+        f"{_mk('4')} База пользователей [dim](SQLite)[/]: поиск по username, просмотр порциями"
     )
     console.print()
-    console.print("[bold]Сбор и действия в Telegram[/]")
-    console.print(f"{_mi('2')} Сбор базы пользователей [dim](п.1 — новый вход / стандарт)[/]")
-    console.print(f"{_mi('3')} Вступить в группы")
+    console.print("[bold white]── Telegram ──[/]")
     console.print(
-        f"{_mi('4')} Добавить в контакты: один аккаунт [dim](общий / отдельный вход)[/] или пул"
+        f"{_mk('5')} Сбор базы пользователей [dim](подменю: один аккаунт или стандарт)[/]"
     )
-    console.print(f"{_mi('5')} Пригласить в канал")
+    console.print(f"{_mk('6')} Вступить в группы")
+    console.print(
+        f"{_mk('7')} Добавить в контакты [dim](один аккаунт или пул)[/]"
+    )
+    console.print(f"{_mk('8')} Пригласить в канал")
     console.print()
-    console.print("[bold]Система[/]")
+    console.print("[bold white]── Система и сервис ──[/]")
     console.print(
-        f"{_mi('8')} Импорты, настройки и аккаунты [dim](ZIP, прокси, сессии, опционально API)[/]"
-    )
-    console.print()
-    console.print("[bold]Обслуживание[/]")
-    console.print(
-        "[bold yellow] 9[/]  [bold]Очистить[/] список найденных групп "
-        "([dim]output/found_groups.json[/], не БД)"
+        f"{_mk('9')} Импорты, настройки и аккаунты [dim](ZIP, прокси, сессии, API)[/]"
     )
     console.print(
-        "[cyan]a[/]  База продавцов: удалить записи [bold]без[/] признаков РБ "
-        "([dim]username + metadata, cities_by[/])"
+        f"{_mk('a')} Очистить список найденных групп [dim](found_groups.json, не БД)[/]"
+    )
+    console.print(
+        f"{_mk('b')} Фильтр базы продавцов: удалить записи без признаков РБ [dim](users)[/]"
     )
     console.print()
-    console.print(f"{_mi('0')} Выход")
-    console.print("[dim]Ввод: 0–9, a или b.[/]")
+    console.print(f"{_mk('0')} Выход")
+    console.print("[dim]Ввод: 1–9, a, b или 0.[/]")
     console.print()
     return Prompt.ask(
         "Выберите действие",
@@ -378,7 +376,7 @@ def _render_main_menu() -> str:
 
 
 def _run_import_zip_interactive() -> None:
-    """Импорт ZIP с парами .json + .session (хаб 8 → 1)."""
+    """Импорт ZIP с парами .json + .session (хаб 9 → 1)."""
     console.print(
         "\n[bold]Импорт архива аккаунтов[/]\n"
         "[dim]В ZIP должны быть пары файлов с одним именем: name.json и name.session. "
@@ -412,10 +410,10 @@ def _run_import_zip_interactive() -> None:
 
 
 def _run_settings_submenu() -> None:
-    """Настройки подключения: прокси, default api, синхронизация (хаб 8 → 2)."""
+    """Настройки подключения: прокси, default api, синхронизация (хаб 9 → 2)."""
     while True:
         console.print()
-        console.print("[bold cyan]Настройки[/]")
+        console.print("[bold white]── Настройки ──[/]")
         s = Settings()
         pe = "вкл" if is_proxy_enabled() else "выкл"
         ddir = str(telethon_session_dir_path(s)).replace("\\", "/")
@@ -426,12 +424,12 @@ def _run_settings_submenu() -> None:
             f"[dim]telethon_default_api в settings:[/] "
             f"{'api_id=' + str(dapi) + ', api_hash задан' if dapi and dhash_ok else '[yellow]не задан[/]'}"
         )
-        console.print(f"{_mi('1')} Включить / выключить использование прокси ([dim]proxy_enabled[/])")
-        console.print(f"{_mi('2')} Назначить прокси аккаунтам (round-robin из пула → accounts.json)")
-        console.print(f"{_mi('3')} Проверить прокси из пула")
-        console.print(f"{_mi('4')} Задать telethon_default_api ([dim]api_id + api_hash для автопривязки сессий[/])")
-        console.print(f"{_mi('5')} Синхронизировать папку сессий → accounts.json [dim](как при старте)[/]")
-        console.print(f"{_mi('0')} Назад")
+        console.print(f"{_mk('1')} Включить / выключить использование прокси ([dim]proxy_enabled[/])")
+        console.print(f"{_mk('2')} Назначить прокси аккаунтам (round-robin из пула → accounts.json)")
+        console.print(f"{_mk('3')} Проверить прокси из пула")
+        console.print(f"{_mk('4')} Задать telethon_default_api ([dim]api_id + api_hash для автопривязки сессий[/])")
+        console.print(f"{_mk('5')} Синхронизировать папку сессий → accounts.json [dim](как при старте)[/]")
+        console.print(f"{_mk('0')} Назад")
         console.print()
         sub = Prompt.ask("Выбор", choices=["0", "1", "2", "3", "4", "5"], default="0")
         if sub == "0":
@@ -485,13 +483,13 @@ def _run_settings_submenu() -> None:
 def _run_mytelegram_api_placeholder() -> None:
     """Опциональное получение api с my.telegram.org (фаза 2)."""
     console.print()
-    console.print("[bold cyan]API my.telegram.org[/] [dim](можно пропустить)[/]")
+    console.print("[bold white]── API my.telegram.org ──[/] [dim](можно пропустить)[/]")
     console.print(
         "[dim]Автоматический вход на сайт и запись api_id/api_hash (Playwright + код из Telegram) — фаза 2. "
-        "Сейчас: ключи вручную в config или [bold]8 → 2[/] → telethon_default_api.[/]"
+        "Сейчас: ключи вручную в config или [bold]9 → 2[/] → telethon_default_api.[/]"
     )
-    console.print("  [cyan]0[/]  Назад [dim](не регистрировать сейчас)[/]")
-    console.print("  [cyan]1[/]  Проверить, установлен ли Playwright [dim](для будущего сценария)[/]")
+    console.print(f"{_mk('0')} Назад [dim](не регистрировать сейчас)[/]")
+    console.print(f"{_mk('1')} Проверить, установлен ли Playwright [dim](для будущего сценария)[/]")
     sub = Prompt.ask(
         "Выбор",
         choices=["0", "1"],
@@ -514,13 +512,13 @@ def _run_system_hub_submenu() -> None:
     """Хаб: импорт, настройки, сессии, опционально API."""
     while True:
         console.print()
-        console.print("[bold cyan]Импорты, настройки и аккаунты[/]")
-        console.print(f"{_mi('1')} [bold]Импорт[/]: ZIP с парами .json + .session")
-        console.print(f"{_mi('2')} [bold]Настройки[/]: прокси, telethon_default_api, синхронизация сессий")
-        console.print(f"{_mi('3')} [bold]Сессии Telethon[/]: список, привязка, вход, автопривязка")
-        console.print(f"{_mi('4')} [bold]API my.telegram.org[/] [dim](опционально, можно пропустить)[/]")
-        console.print(f"{_mi('5')} Подготовка аккаунтов: 2FA → прокси → сброс чужих сессий")
-        console.print(f"{_mi('0')} Назад в главное меню")
+        console.print("[bold white]── Импорты, настройки и аккаунты ──[/]")
+        console.print(f"{_mk('1')} Импорт ZIP [dim](пары .json + .session)[/]")
+        console.print(f"{_mk('2')} Настройки [dim](прокси, telethon_default_api, синхронизация)[/]")
+        console.print(f"{_mk('3')} Сессии Telethon [dim](список, привязка, вход, автопривязка)[/]")
+        console.print(f"{_mk('4')} API my.telegram.org [dim](опционально)[/]")
+        console.print(f"{_mk('5')} Подготовка аккаунтов [dim](2FA, прокси, сброс сессий)[/]")
+        console.print(f"{_mk('0')} Назад в главное меню")
         console.print()
         sub = Prompt.ask(
             "Выбор",
@@ -675,7 +673,8 @@ async def _run_scrape(
         console.print(
             "[yellow]Сбор не запущен:[/] нет списка групп, пустой [dim]found_groups.json[/], "
             "отмена ([cyan]0[/]) или ошибка файла. "
-            "Нужен [bold]п.1[/] главного меню (поиск) или [bold]п.2[/] в этом запросе — [dim]group_links.txt[/] со ссылками [dim]t.me[/]."
+            "Нужен пункт [bold]1[/] главного меню (поиск) или в запросе источника групп — [bold]2[/]/[bold]3[/] "
+            "(txt с [dim]t.me[/], см. [dim]group_links.txt[/])."
         )
         return
 
@@ -748,15 +747,15 @@ async def _run_scrape(
 async def _run_scrape_single_account_branch() -> None:
     """П.2→1: общий аккаунт без прокси или отдельный вход."""
     console.print()
-    console.print("[bold]Один аккаунт для сбора[/]")
+    console.print("[bold white]── Один аккаунт для сбора ──[/]")
     console.print(
-        f"{_mi('1')} [bold]Общий[/]: выбрать аккаунт из accounts.json — сбор [bold]без прокси[/] (только этот session)"
+        f"{_mk('1')} [bold]Общий[/]: выбрать аккаунт из accounts.json — сбор [bold]без прокси[/] (только этот session)"
     )
     console.print(
-        f"{_mi('2')} [bold]Отдельный[/]: вход в консоли (api, телефон, код, 2FA); прокси — при входе и "
+        f"{_mk('2')} [bold]Отдельный[/]: вход в консоли (api, телефон, код, 2FA); прокси — при входе и "
         f"повторно перед сбором (в т.ч. для сохранённой сессии)"
     )
-    console.print(f"{_mi('0')} Назад")
+    console.print(f"{_mk('0')} Назад")
     ch = Prompt.ask("Выбор", choices=["0", "1", "2"], default="0")
     if ch == "0":
         return
@@ -764,7 +763,7 @@ async def _run_scrape_single_account_branch() -> None:
         accs = load_accounts()
         if not accs:
             console.print(
-                "[red]Нет аккаунтов в accounts.json.[/] Добавьте сессию: главное меню → 8 → 3."
+                "[red]Нет аккаунтов в accounts.json.[/] Добавьте сессию: главное меню → [bold]9[/] → [bold]3[/]."
             )
             return
         for i, a in enumerate(accs, 1):
@@ -820,15 +819,15 @@ async def _run_scrape_single_account_branch() -> None:
 
 
 def _run_scrape_entry() -> None:
-    """Главное меню п.2: подменю — п.1 один аккаунт или стандартный сбор."""
+    """Главное меню п.5: подменю сбора — один аккаунт или стандарт."""
     while True:
         console.print()
-        console.print("[bold cyan]Сбор базы пользователей[/]")
+        console.print("[bold white]── Сбор базы пользователей ──[/]")
         console.print(
-            f"{_mi('1')} Один аккаунт: общий (из списка, без прокси) или отдельный (вход в консоли + прокси опционально)"
+            f"{_mk('1')} Один аккаунт: общий (из списка, без прокси) или отдельный (вход в консоли + прокси опционально)"
         )
-        console.print(f"{_mi('2')} Стандартный сбор (settings: пул аккаунтов и scrape_use_proxy / прокси)")
-        console.print(f"{_mi('0')} Назад в главное меню")
+        console.print(f"{_mk('2')} Стандартный сбор (settings: пул аккаунтов и scrape_use_proxy / прокси)")
+        console.print(f"{_mk('0')} Назад в главное меню")
         sub = Prompt.ask("Выбор", choices=["0", "1", "2"], default="2")
         if sub == "0":
             break
@@ -1025,10 +1024,10 @@ async def _add_contacts_workflow(
     console.print()
     console.print("[bold]Кого брать из базы?[/]")
     console.print(
-        f"{_mi('1')} Только [bold]не[/] помеченных «в контактах» [dim](в БД пусто — ещё не проходили п.4)[/]"
+        f"{_mk('1')} Только [bold]не[/] помеченных «в контактах» [dim](ещё не проходили п.7)[/]"
     )
     console.print(
-        f"{_mi('2')} [bold]Всех[/] в категории [dim](и помеченных, и нет — повтор AddContact в Telegram обычно безвреден)[/]"
+        f"{_mk('2')} [bold]Всех[/] в категории [dim](и помеченных, и нет — повтор AddContact в Telegram обычно безвреден)[/]"
     )
     scope = Prompt.ask("Выбор", choices=["1", "2"], default="1")
     exclude_added = scope == "1"
@@ -1078,14 +1077,14 @@ async def _add_contacts_workflow(
 async def _run_add_contacts_one_account_sub() -> None:
     """П.4→1: общий аккаунт без прокси (как сбор) или отдельный вход."""
     console.print()
-    console.print("[bold]Один аккаунт — добавление в контакты[/]")
+    console.print("[bold white]── Один аккаунт — контакты ──[/]")
     console.print(
-        f"{_mi('1')} [bold]Общий[/]: выбрать аккаунт из accounts.json — [bold]без прокси[/] пула (только этот session)"
+        f"{_mk('1')} [bold]Общий[/]: выбрать аккаунт из accounts.json — [bold]без прокси[/] пула (только этот session)"
     )
     console.print(
-        f"{_mi('2')} [bold]Отдельный[/]: вход в консоли (api, телефон, код, 2FA); прокси — при входе и перед операцией"
+        f"{_mk('2')} [bold]Отдельный[/]: вход в консоли (api, телефон, код, 2FA); прокси — при входе и перед операцией"
     )
-    console.print(f"{_mi('0')} Назад")
+    console.print(f"{_mk('0')} Назад")
     ch = Prompt.ask("Выбор", choices=["0", "1", "2"], default="0")
     if ch == "0":
         return
@@ -1093,7 +1092,7 @@ async def _run_add_contacts_one_account_sub() -> None:
         accs = load_accounts()
         if not accs:
             console.print(
-                "[red]Нет аккаунтов в accounts.json.[/] Добавьте сессию: главное меню → 8 → 3."
+                "[red]Нет аккаунтов в accounts.json.[/] Добавьте сессию: главное меню → [bold]9[/] → [bold]3[/]."
             )
             return
         for i, a in enumerate(accs, 1):
@@ -1150,14 +1149,14 @@ async def _run_add_contacts_one_account_sub() -> None:
 
 
 async def _run_add_contacts() -> None:
-    """Добавить в контакты (как п.2 сбор: один аккаунт / пул)."""
+    """Добавить в контакты (как п.5 сбор: один аккаунт / пул)."""
     console.print()
-    console.print("[bold cyan]Добавить в контакты[/]")
+    console.print("[bold white]── Добавить в контакты ──[/]")
     console.print(
-        f"{_mi('1')} Один аккаунт: общий (из списка, без прокси) или отдельный (вход в консоли + прокси)"
+        f"{_mk('1')} Один аккаунт: общий (из списка, без прокси) или отдельный (вход в консоли + прокси)"
     )
-    console.print(f"{_mi('2')} Пул аккаунтов [dim](ротация)[/]")
-    console.print(f"{_mi('0')} Отмена")
+    console.print(f"{_mk('2')} Пул аккаунтов [dim](ротация)[/]")
+    console.print(f"{_mk('0')} Отмена")
     mode = Prompt.ask("Выбор", choices=["0", "1", "2"], default="2")
     if mode == "0":
         return
@@ -1283,7 +1282,7 @@ async def _run_purge_users_belarus() -> None:
         f"в username и metadata): [green]оставить {n_keep}[/], [red]удалить {n_drop}[/]."
     )
     console.print(
-        "[yellow]П.9 чистит только found_groups.json; это действие необратимо для users. "
+        "[yellow]Пункт [bold]a[/] чистит только found_groups.json; это действие необратимо для users. "
         "Скопируйте vibe_marketing.db при сомнениях.[/]"
     )
     if n_drop == 0:
@@ -1303,7 +1302,7 @@ async def _run_purge_users_belarus() -> None:
 async def _run_browse_users_db() -> None:
     """Поиск по username и листинг users порциями."""
     console.print()
-    console.print("[bold cyan]База пользователей (SQLite)[/]")
+    console.print("[bold white]── База пользователей (SQLite) ──[/]")
     db = get_db()
     with console_loading(console, "Загрузка…"):
         await db.init()
@@ -1443,7 +1442,7 @@ def _run_view_groups() -> None:
     console.print(table)
     console.print(f"[dim]Всего групп: {len(groups)}. Файл: {found_path}[/]")
     console.print(
-        "[dim]Очистить весь файл — [bold]главное меню → 9[/] или подтвердите ниже.[/]"
+        "[dim]Очистить весь файл — [bold]главное меню → a[/] или подтвердите ниже.[/]"
     )
     if Confirm.ask("Очистить found_groups.json (все записи)?", default=False):
         found_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1522,25 +1521,25 @@ def run_menu() -> None:
             if choice == "1":
                 asyncio.run(_run_search())
             elif choice == "2":
-                _run_scrape_entry()
-            elif choice == "3":
-                asyncio.run(_run_join_groups())
-            elif choice == "4":
-                asyncio.run(_run_add_contacts())
-            elif choice == "5":
-                asyncio.run(_run_invite())
-            elif choice == "6":
-                asyncio.run(_run_stats())
-            elif choice == "7":
                 _run_view_groups()
-            elif choice == "9":
-                _run_clear_found_groups()
-            elif choice == "a":
-                asyncio.run(_run_purge_users_belarus())
-            elif choice == "8":
-                _run_system_hub_submenu()
-            elif choice == "b":
+            elif choice == "3":
+                asyncio.run(_run_stats())
+            elif choice == "4":
                 asyncio.run(_run_browse_users_db())
+            elif choice == "5":
+                _run_scrape_entry()
+            elif choice == "6":
+                asyncio.run(_run_join_groups())
+            elif choice == "7":
+                asyncio.run(_run_add_contacts())
+            elif choice == "8":
+                asyncio.run(_run_invite())
+            elif choice == "9":
+                _run_system_hub_submenu()
+            elif choice == "a":
+                _run_clear_found_groups()
+            elif choice == "b":
+                asyncio.run(_run_purge_users_belarus())
         except KeyboardInterrupt:
             console.print("\n[yellow]Прервано.[/]")
         except Exception as e:

@@ -194,8 +194,8 @@ async def _list_sessions_console(console) -> None:
     console.print(table)
     console.print(
         f"[dim]Файлы лежат в [cyan]{dlabel}[/]. "
-        "Назначение прокси (меню 8→1) затрагивает только строки в accounts.json — "
-        "сначала привяжите .session через п.2 или п.3. "
+        "Назначение прокси (меню 9→2→2) затрагивает только строки в accounts.json — "
+        "сначала привяжите .session: главное меню [bold]9[/] → [bold]3[/], пункты [bold]2[/] или [bold]3[/]. "
         "Нужны api_id и api_hash с https://my.telegram.org.[/]"
     )
 

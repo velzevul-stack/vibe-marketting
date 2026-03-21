@@ -39,7 +39,7 @@ def _client_for(acc: dict, proxy: str | None, settings: Settings) -> TelegramCli
 async def run_bulk_account_prepare(console) -> None:
     """
     1) Включить облачный пароль 2FA (без email), если ещё не включён.
-    2) Назначить прокси из пула (как меню 8 → 1).
+    2) Назначить прокси из пула (как меню 9 → 2 → 2).
     3) Подключиться с прокси и вызвать auth.resetAuthorizations (все другие устройства вылетают).
     """
     settings = Settings()

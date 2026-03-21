@@ -4,7 +4,7 @@
     "_template": true
   },
   {
-    "_comment_account": "Поле proxy не копируйте из шаблона. Либо п.8→1 «Назначить прокси» (из proxies.txt), либо реальный URL; иначе Telethon будет лезть на выдуманный хост.",
+    "_comment_account": "Поле proxy не копируйте из шаблона. Либо меню 9→2→2 «Назначить прокси» (из proxies.txt), либо реальный URL; иначе Telethon будет лезть на выдуманный хост.",
     "session_name": "account1",
     "api_id": 12345678,
     "api_hash": "abcdef1234567890abcdef1234567890",

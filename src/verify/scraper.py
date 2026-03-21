@@ -101,7 +101,7 @@ def _friendly_entity_error(exc: BaseException, ref: str) -> ValueError:
     if isinstance(exc, ChannelPrivateError):
         hint = (
             "Чат закрытый — этот аккаунт не состоит в группе. Сначала главное меню → "
-            "п.3 «Вступить в группы», затем снова сбор."
+            "п.6 «Вступить в группы», затем снова сбор."
         )
     else:
         hint = (
