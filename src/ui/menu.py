@@ -516,14 +516,11 @@ def _run_system_hub_submenu() -> None:
         console.print(f"{_mk('3')} Сессии Telethon [dim](список, привязка, вход, автопривязка)[/]")
         console.print(f"{_mk('4')} API my.telegram.org [dim](опционально)[/]")
         console.print(f"{_mk('5')} Подготовка аккаунтов [dim](2FA, прокси, сброс сессий)[/]")
-        console.print(
-            f"{_mk('6')} Фильтр базы продавцов [dim](SQLite users: удалить без признаков РБ)[/]"
-        )
         console.print(f"{_mk('0')} Назад в главное меню")
         console.print()
         sub = Prompt.ask(
             "Выбор",
-            choices=["0", "1", "2", "3", "4", "5", "6"],
+            choices=["0", "1", "2", "3", "4", "5"],
             default="0",
         )
         if sub == "0":
@@ -539,8 +536,6 @@ def _run_system_hub_submenu() -> None:
                 _run_mytelegram_api_placeholder()
             elif sub == "5":
                 asyncio.run(run_bulk_account_prepare(console))
-            elif sub == "6":
-                asyncio.run(_run_purge_users_belarus())
         except KeyboardInterrupt:
             console.print("\n[yellow]Прервано.[/]")
         except Exception as e:
@@ -1266,40 +1261,6 @@ def _run_assign_proxies() -> None:
     else:
         console.print(f"[red]{msg}[/]")
     Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
-
-
-async def _run_purge_users_belarus() -> None:
-    """Удалить из SQLite users строки без эвристики «Беларусь»."""
-    db = get_db()
-    with console_loading(console, "Подключение к базе…"):
-        await db.init()
-    n_drop, n_keep = await db.preview_belarus_user_purge()
-    total = n_drop + n_keep
-    if total == 0:
-        console.print("[yellow]Таблица users пуста — нечего фильтровать.[/]")
-        Prompt.ask("\n[dim]Нажмите Enter…[/]", default="")
-        return
-    console.print(
-        "[bold]Фильтр базы продавцов (SQLite)[/] [dim]output/vibe_marketing.db → users[/]\n"
-        f"Сейчас записей: [white]{total}[/]. По эвристике РБ (маркеры + города из [bold]data/cities_by.json[/] "
-        f"в username и metadata): [green]оставить {n_keep}[/], [red]удалить {n_drop}[/]."
-    )
-    console.print(
-        "[yellow]Пункт [bold]a[/] чистит только found_groups.json; это действие необратимо для users. "
-        "Скопируйте vibe_marketing.db при сомнениях.[/]"
-    )
-    if n_drop == 0:
-        console.print("[green]Удалять нечего — все строки уже с признаками РБ (или база пуста).[/]")
-        Prompt.ask("\n[dim]Нажмите Enter…[/]", default="")
-        return
-    if not Confirm.ask(f"Удалить {n_drop} записей из users?", default=False):
-        console.print("[dim]Отменено.[/]")
-        Prompt.ask("\n[dim]Нажмите Enter…[/]", default="")
-        return
-    with console_loading(console, "Удаление записей…"):
-        deleted, kept = await db.purge_users_without_belarus_signals()
-    console.print(f"[green]Готово:[/] удалено [bold]{deleted}[/], осталось [bold]{kept}[/].")
-    Prompt.ask("\n[dim]Нажмите Enter…[/]", default="")
 
 
 async def _run_browse_users_db() -> None:
