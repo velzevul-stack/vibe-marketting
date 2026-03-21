@@ -220,9 +220,23 @@ class InviteManager:
             return False
         return await self.add_to_contacts_with_session(username, state.session_name)
 
-    async def add_to_contacts_with_session(self, username: str, session_name: str) -> bool:
-        """Добавить пользователя в контакты с указанного аккаунта."""
-        client = self.pool.get_client(session_name)
+    async def add_to_contacts_with_session(
+        self,
+        username: str,
+        session_name: str,
+        *,
+        settings: Settings | None = None,
+        prefer_pool_for_read: bool = False,
+    ) -> bool:
+        """
+        Добавить пользователя в контакты с указанного аккаунта.
+        ``prefer_pool_for_read=True`` + ``settings.scrape_use_proxy=False`` — как сбор «общий без прокси».
+        """
+        client = self.pool.get_client(
+            session_name,
+            prefer_pool_for_read=prefer_pool_for_read,
+            settings=settings,
+        )
         if not client:
             return False
         try:
@@ -246,6 +260,28 @@ class InviteManager:
             return False
         finally:
             await client.disconnect()
+
+    async def add_to_contacts_with_client(self, client: TelegramClient, username: str) -> bool:
+        """Один и тот же клиент на всю серию (отдельный вход). Без disconnect."""
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                return False
+            username_clean = username.lstrip("@")
+            await client(
+                AddContactRequest(
+                    id=username_clean,
+                    first_name=username_clean,
+                    last_name="",
+                    phone="",
+                )
+            )
+            return True
+        except FloodWaitError as e:
+            await asyncio.sleep(e.seconds)
+            return await self.add_to_contacts_with_client(client, username)
+        except Exception:
+            return False
 
     async def join_group(self, link: str) -> tuple[bool, str | None, str]:
         """

@@ -37,6 +37,7 @@ from src.telethon_session_menu import login_client_for_one_off_scrape, run_telet
 from src.accounts_bulk_prepare import run_bulk_account_prepare
 from src.session_sync import sync_sessions_dir_to_accounts
 from src.cli_input import parse_nonneg_int_clamped, strip_c0_controls
+from telethon import TelegramClient
 
 console = Console()
 
@@ -340,7 +341,9 @@ def _render_main_menu() -> str:
     console.print()
     console.print("[bold]Действия в Telegram[/]")
     console.print(f"{_mi('3')} Вступить в группы")
-    console.print(f"{_mi('4')} Добавить в контакты [dim](один аккаунт или пул)[/]")
+    console.print(
+        f"{_mi('4')} Добавить в контакты: один аккаунт [dim](общий / отдельный вход)[/] или пул"
+    )
     console.print(f"{_mi('5')} Пригласить в канал")
     console.print()
     console.print(f"{_mi('8')} Прокси, сессии и аккаунты…")
@@ -855,45 +858,15 @@ async def _run_join_groups() -> None:
     Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
 
 
-async def _run_add_contacts() -> None:
-    """Добавить в контакты."""
-    console.print()
-    console.print("[bold cyan]Добавить в контакты[/]")
-    console.print(
-        f"{_mi('1')} [bold]Один аккаунт[/]: выбрать из [dim]accounts.json[/] — все добавления только с этой сессии"
-    )
-    console.print(f"{_mi('2')} [bold]Пул[/]: ротация аккаунтов (как раньше)")
-    console.print(f"{_mi('0')} Отмена")
-    mode = Prompt.ask("Выбор", choices=["0", "1", "2"], default="2")
-    if mode == "0":
-        return
-
-    fixed_session: str | None = None
-    if mode == "1":
-        accs = load_accounts()
-        if not accs:
-            console.print(
-                "[red]Нет аккаунтов в accounts.json.[/] Добавьте сессию: главное меню → 8."
-            )
-            return
-        for i, a in enumerate(accs, 1):
-            name = a.get("session_name", "?")
-            console.print(f"  [cyan]{i}[/]  {escape(str(name))}")
-        pick = _prompt_nonneg_int(
-            "Номер аккаунта из списка",
-            default=1,
-            minimum=1,
-            maximum=len(accs),
-        )
-        picked = accs[pick - 1]
-        fixed_session = picked.get("session_name")
-        if not fixed_session:
-            console.print("[red]У записи нет session_name.[/]")
-            return
-        console.print(
-            f"[dim]Контакты будут добавляться с аккаунта[/] [cyan]{escape(str(fixed_session))}[/]"
-        )
-
+async def _add_contacts_workflow(
+    *,
+    pool: bool,
+    fixed_session: str | None = None,
+    fixed_client: TelegramClient | None = None,
+    session_client_settings: Settings | None = None,
+    prefer_pool_for_read: bool = False,
+) -> None:
+    """Общая логика: категория, список из БД, цикл AddContact."""
     db = get_db()
     await db.init()
     cat = Prompt.ask("Категория (hot/warm/all)", choices=["hot", "warm", "all"], default="hot")
@@ -920,12 +893,116 @@ async def _run_add_contacts() -> None:
         ident = str(uname).lstrip("@")
         if not ident.isdigit():  # AddContact по username, не по id
             console.print(f"  Добавляю @{ident}...")
-            ok = await mgr.add_to_contacts(ident)
+            if fixed_client is not None:
+                ok = await mgr.add_to_contacts_with_client(fixed_client, ident)
+            elif fixed_session:
+                ok = await mgr.add_to_contacts_with_session(
+                    ident,
+                    fixed_session,
+                    settings=session_client_settings,
+                    prefer_pool_for_read=prefer_pool_for_read,
+                )
+            elif pool:
+                ok = await mgr.add_to_contacts(ident)
+            else:
+                ok = False
             if ok:
                 await db.mark_added_to_contacts(u["id"])
             console.print(f"    {'[green]OK[/]' if ok else '[red]FAIL[/]'}")
             delay = max(1, random.uniform(mgr.settings.delay_contact_min, mgr.settings.delay_contact_max))
             await asyncio.sleep(delay)
+
+
+async def _run_add_contacts_one_account_sub() -> None:
+    """П.4→1: общий аккаунт без прокси (как сбор) или отдельный вход."""
+    console.print()
+    console.print("[bold]Один аккаунт — добавление в контакты[/]")
+    console.print(
+        f"{_mi('1')} [bold]Общий[/]: выбрать аккаунт из accounts.json — [bold]без прокси[/] пула (только этот session)"
+    )
+    console.print(
+        f"{_mi('2')} [bold]Отдельный[/]: вход в консоли (api, телефон, код, 2FA); прокси — при входе и перед операцией"
+    )
+    console.print(f"{_mi('0')} Назад")
+    ch = Prompt.ask("Выбор", choices=["0", "1", "2"], default="0")
+    if ch == "0":
+        return
+    if ch == "1":
+        accs = load_accounts()
+        if not accs:
+            console.print(
+                "[red]Нет аккаунтов в accounts.json.[/] Добавьте сессию: главное меню → 8 → 3."
+            )
+            return
+        for i, a in enumerate(accs, 1):
+            name = a.get("session_name", "?")
+            console.print(f"  [cyan]{i}[/]  {escape(str(name))}")
+        pick = _prompt_nonneg_int(
+            "Номер аккаунта из списка",
+            default=1,
+            minimum=1,
+            maximum=len(accs),
+        )
+        picked = accs[pick - 1]
+        name = picked.get("session_name")
+        if not name:
+            console.print("[red]У записи нет session_name.[/]")
+            return
+        console.print(
+            "[dim]Прокси пула для контактов отключён (как при сборе «общий»).[/]"
+        )
+        s_one = clone_settings(scrape_use_proxy=False, scrape_session_name=str(name))
+        await _add_contacts_workflow(
+            pool=False,
+            fixed_session=str(name),
+            session_client_settings=s_one,
+            prefer_pool_for_read=True,
+        )
+        return
+
+    logged = await login_client_for_one_off_scrape(console)
+    if not logged:
+        return
+    client, meta = logged
+    console.print()
+    console.print(
+        "[bold green]Вход в Telegram выполнен.[/]\n"
+        "[dim]Дальше выберите категорию и число контактов из базы — добавление с этой сессии.[/]"
+    )
+    try:
+        await _add_contacts_workflow(pool=False, fixed_client=client)
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+    if Confirm.ask("Добавить этот аккаунт в accounts.json?", default=False):
+        upsert_telethon_account(
+            meta["session_name"],
+            meta["api_id"],
+            meta["api_hash"],
+            phone=meta.get("phone"),
+            proxy=meta.get("proxy_url"),
+        )
+        console.print(f"[green]Записано в {accounts_json_path()}[/]")
+
+
+async def _run_add_contacts() -> None:
+    """Добавить в контакты (как п.2 сбор: один аккаунт / пул)."""
+    console.print()
+    console.print("[bold cyan]Добавить в контакты[/]")
+    console.print(
+        f"{_mi('1')} Один аккаунт: общий (из списка, без прокси) или отдельный (вход в консоли + прокси)"
+    )
+    console.print(f"{_mi('2')} Пул аккаунтов [dim](ротация)[/]")
+    console.print(f"{_mi('0')} Отмена")
+    mode = Prompt.ask("Выбор", choices=["0", "1", "2"], default="2")
+    if mode == "0":
+        return
+    if mode == "1":
+        await _run_add_contacts_one_account_sub()
+    else:
+        await _add_contacts_workflow(pool=True)
     Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
 
 
