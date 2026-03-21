@@ -58,6 +58,37 @@ def set_proxy_enabled(enabled: bool) -> tuple[bool, str]:
     return True, str(path)
 
 
+def set_telethon_default_api(api_id: int, api_hash: str) -> tuple[bool, str]:
+    """
+    Записать telethon_default_api (api_id, api_hash) в config/settings.json.
+    Сохраняет остальные ключи; корень — объект JSON.
+    """
+    path = settings_json_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        try:
+            raw = path.read_text(encoding="utf-8-sig").strip()
+            data = json.loads(raw) if raw else {}
+        except (OSError, json.JSONDecodeError) as e:
+            return False, f"Не удалось прочитать settings.json: {e}"
+        if not isinstance(data, dict):
+            return False, "settings.json: корень должен быть объектом JSON"
+    else:
+        data = {}
+    data["telethon_default_api"] = {
+        "api_id": int(api_id),
+        "api_hash": str(api_hash).strip(),
+    }
+    try:
+        path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as e:
+        return False, f"Не удалось записать settings.json: {e}"
+    return True, str(path)
+
+
 class Settings:
     """Настройки из config/settings.json."""
 

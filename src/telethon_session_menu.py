@@ -653,7 +653,7 @@ async def run_telethon_session_menu(console) -> None:
         console.print("[[2]] Привязать готовый .session (скопировать + запись в accounts.json)")
         console.print("[[3]] Новая авторизация по телефону (создать .session)")
         console.print("[[4]] Автопривязка: папка с .session или config/session_bind.txt")
-        console.print("[[0]] Назад в главное меню")
+        console.print("[[0]] Назад [dim](в хаб импортов/настроек)[/]")
         sub = Prompt.ask("Выбор", choices=["0", "1", "2", "3", "4"], default="0")
         if sub == "0":
             break

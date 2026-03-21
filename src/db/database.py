@@ -46,6 +46,7 @@ class Database:
                 )
             """)
             await db.execute("CREATE INDEX IF NOT EXISTS idx_users_category ON users(category)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
             await db.commit()
 
     async def add_chat(self, telegram_id: str, title: str, link: str, members_count: int = 0, source: str = "manual") -> None:
@@ -199,6 +200,55 @@ class Database:
             await db.commit()
             kept = len(rows) - len(to_delete)
             return len(to_delete), kept
+
+    async def count_users_search(
+        self,
+        username_contains: str | None = None,
+        category: str | None = None,
+    ) -> int:
+        """Число строк users с опциональным фильтром по подстроке username (без @, регистронезависимо)."""
+        async with aiosqlite.connect(self.db_path) as db:
+            conds = ["1=1"]
+            params: list = []
+            if username_contains and str(username_contains).strip():
+                term = f"%{str(username_contains).strip().lstrip('@').lower()}%"
+                conds.append("LOWER(COALESCE(username, '')) LIKE ?")
+                params.append(term)
+            if category and str(category).strip() and category != "all":
+                conds.append("category = ?")
+                params.append(category)
+            sql = f"SELECT COUNT(*) FROM users WHERE {' AND '.join(conds)}"
+            cursor = await db.execute(sql, tuple(params))
+            row = await cursor.fetchone()
+            return int(row[0]) if row else 0
+
+    async def list_users_search_page(
+        self,
+        username_contains: str | None = None,
+        category: str | None = None,
+        offset: int = 0,
+        limit: int = 20,
+    ) -> list[dict]:
+        """Страница users для просмотра/поиска."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            conds = ["1=1"]
+            params: list = []
+            if username_contains and str(username_contains).strip():
+                term = f"%{str(username_contains).strip().lstrip('@').lower()}%"
+                conds.append("LOWER(COALESCE(username, '')) LIKE ?")
+                params.append(term)
+            if category and str(category).strip() and category != "all":
+                conds.append("category = ?")
+                params.append(category)
+            params.extend([limit, max(0, offset)])
+            sql = (
+                f"SELECT id, telegram_id, username, category, first_seen_at, metadata "
+                f"FROM users WHERE {' AND '.join(conds)} ORDER BY id LIMIT ? OFFSET ?"
+            )
+            cursor = await db.execute(sql, tuple(params))
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
 
 
 _db: Database | None = None

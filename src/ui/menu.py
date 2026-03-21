@@ -3,6 +3,7 @@ import asyncio
 import json
 import random
 import sys
+import zipfile
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,12 +23,17 @@ from src.config import (
     assign_proxies_round_robin_to_accounts,
     clone_settings,
     group_links_file_path,
+    is_proxy_enabled,
     load_accounts,
     load_groups_from_links_txt,
     load_proxy_pool_from_config,
     mask_proxy_display,
+    set_proxy_enabled,
+    set_telethon_default_api,
+    telethon_session_dir_path,
     upsert_telethon_account,
 )
+from src.account_zip_import import import_sessions_zip, print_zip_import_report
 from src.db import get_db
 from src.search import search_groups
 from src.verify.scraper import normalize_scrape_target, scrape_group
@@ -36,7 +42,8 @@ from src.invite import InviteManager, AccountPool
 from src.telethon_session_menu import login_client_for_one_off_scrape, run_telethon_session_menu
 from src.accounts_bulk_prepare import run_bulk_account_prepare
 from src.session_sync import sync_sessions_dir_to_accounts
-from src.cli_input import parse_nonneg_int_clamped, strip_c0_controls
+from src.cli_input import parse_api_id_digits, parse_nonneg_int_clamped, strip_c0_controls
+from src.ui.progress_util import console_loading
 from telethon import TelegramClient
 
 console = Console()
@@ -331,64 +338,207 @@ def _render_main_menu() -> str:
     console.print()
     console.print("[bold]Данные и поиск[/]")
     console.print(f"{_mi('1')} Поиск групп")
-    console.print(f"{_mi('2')} Сбор базы пользователей [dim](п.1 — новый вход в Telegram / стандарт)[/]")
-    console.print(f"{_mi('7')} Просмотр найденных групп")
+    console.print(f"{_mi('7')} Просмотр найденных групп [dim](output/found_groups.json)[/]")
     console.print(f"{_mi('6')} Статистика базы")
     console.print(
-        "[bold yellow] 9[/]  [bold]Очистить[/] список найденных групп "
-        "([dim]output/found_groups.json[/])"
+        "[cyan]b[/]  База пользователей ([dim]SQLite users[/]): поиск по username, просмотр порциями"
     )
     console.print()
-    console.print("[bold]Действия в Telegram[/]")
+    console.print("[bold]Сбор и действия в Telegram[/]")
+    console.print(f"{_mi('2')} Сбор базы пользователей [dim](п.1 — новый вход / стандарт)[/]")
     console.print(f"{_mi('3')} Вступить в группы")
     console.print(
         f"{_mi('4')} Добавить в контакты: один аккаунт [dim](общий / отдельный вход)[/] или пул"
     )
     console.print(f"{_mi('5')} Пригласить в канал")
     console.print()
-    console.print(f"{_mi('8')} Прокси, сессии и аккаунты…")
+    console.print("[bold]Система[/]")
+    console.print(
+        f"{_mi('8')} Импорты, настройки и аккаунты [dim](ZIP, прокси, сессии, опционально API)[/]"
+    )
+    console.print()
+    console.print("[bold]Обслуживание[/]")
+    console.print(
+        "[bold yellow] 9[/]  [bold]Очистить[/] список найденных групп "
+        "([dim]output/found_groups.json[/], не БД)"
+    )
+    console.print(
+        "[cyan]a[/]  База продавцов: удалить записи [bold]без[/] признаков РБ "
+        "([dim]username + metadata, cities_by[/])"
+    )
+    console.print()
     console.print(f"{_mi('0')} Выход")
-    console.print(
-        "[cyan]a[/]  База продавцов ([dim]SQLite users[/]): удалить записи [bold]без[/] признаков РБ "
-        "([dim]username + metadata, города cities_by[/])"
-    )
-    console.print(
-        "[dim]Ввод: 0–9 или a. П.9 — только [bold]found_groups.json[/], не vibe_marketing.db.[/]"
-    )
+    console.print("[dim]Ввод: 0–9, a или b.[/]")
     console.print()
     return Prompt.ask(
         "Выберите действие",
-        choices=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a"],
+        choices=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b"],
         default="0",
     )
 
 
-def _run_proxy_session_submenu() -> None:
-    """Подменю: прокси, сессии, массовая подготовка."""
+def _run_import_zip_interactive() -> None:
+    """Импорт ZIP с парами .json + .session (хаб 8 → 1)."""
+    console.print(
+        "\n[bold]Импорт архива аккаунтов[/]\n"
+        "[dim]В ZIP должны быть пары файлов с одним именем: name.json и name.session. "
+        "api_id/api_hash можно не вводить сейчас — задайте telethon_default_api в «Настройках» "
+        "или допишите в sidecar .json.[/]"
+    )
+    raw = strip_c0_controls(Prompt.ask("Полный путь к .zip", default="").strip())
+    if not raw:
+        console.print("[dim]Отмена.[/]")
+        return
+    zp = Path(raw).expanduser()
+    if not zp.is_file():
+        console.print(f"[red]Файл не найден: {escape(str(zp))}[/]")
+        return
+    mode = Prompt.ask(
+        "Если файл с таким именем уже есть в папке сессий",
+        choices=["skip", "overwrite"],
+        default="skip",
+    )
+    try:
+        with console.status("[bold]Импорт ZIP…[/]", spinner="dots"):
+            rep = import_sessions_zip(zp, on_conflict=mode, settings=Settings())
+    except (OSError, zipfile.BadZipFile) as e:
+        console.print(f"[red]Ошибка импорта: {escape(str(e))}[/]")
+        return
+    except Exception as e:
+        console.print(f"[red]Ошибка: {escape(str(e))}[/]")
+        return
+    print_zip_import_report(console, rep)
+    Prompt.ask("\n[dim]Нажмите Enter…[/]", default="")
+
+
+def _run_settings_submenu() -> None:
+    """Настройки подключения: прокси, default api, синхронизация (хаб 8 → 2)."""
     while True:
         console.print()
-        console.print("[bold cyan]Прокси, сессии и аккаунты[/]")
-        console.print(f"{_mi('1')} Назначить прокси аккаунтам (из пула → accounts.json)")
-        console.print(f"{_mi('2')} Проверить прокси")
-        console.print(f"{_mi('3')} Сессии Telethon (.session) — список, импорт, вход")
-        console.print(f"{_mi('4')} Подготовка аккаунтов: 2FA → прокси → сброс чужих сессий")
+        console.print("[bold cyan]Настройки[/]")
+        s = Settings()
+        pe = "вкл" if is_proxy_enabled() else "выкл"
+        ddir = str(telethon_session_dir_path(s)).replace("\\", "/")
+        dapi = s.default_telethon_api_id
+        dhash_ok = bool(s.default_telethon_api_hash)
+        console.print(f"[dim]Прокси в рантайме:[/] [yellow]{pe}[/] · [dim]папка сессий:[/] [cyan]{ddir}[/]")
+        console.print(
+            f"[dim]telethon_default_api в settings:[/] "
+            f"{'api_id=' + str(dapi) + ', api_hash задан' if dapi and dhash_ok else '[yellow]не задан[/]'}"
+        )
+        console.print(f"{_mi('1')} Включить / выключить использование прокси ([dim]proxy_enabled[/])")
+        console.print(f"{_mi('2')} Назначить прокси аккаунтам (round-robin из пула → accounts.json)")
+        console.print(f"{_mi('3')} Проверить прокси из пула")
+        console.print(f"{_mi('4')} Задать telethon_default_api ([dim]api_id + api_hash для автопривязки сессий[/])")
+        console.print(f"{_mi('5')} Синхронизировать папку сессий → accounts.json [dim](как при старте)[/]")
+        console.print(f"{_mi('0')} Назад")
+        console.print()
+        sub = Prompt.ask("Выбор", choices=["0", "1", "2", "3", "4", "5"], default="0")
+        if sub == "0":
+            break
+        try:
+            if sub == "1":
+                cur = is_proxy_enabled()
+                turn = Confirm.ask(
+                    f"Прокси сейчас [bold]{'включены' if cur else 'выключены'}[/]. Переключить?",
+                    default=not cur,
+                )
+                ok, msg = set_proxy_enabled(turn)
+                console.print(f"[green]{msg}[/]" if ok else f"[red]{msg}[/]")
+            elif sub == "2":
+                _run_assign_proxies()
+            elif sub == "3":
+                asyncio.run(_run_check_proxies())
+            elif sub == "4":
+                console.print(
+                    "[dim]Один api_id/api_hash на все новые .session без своих ключей в sidecar. "
+                    "Можно пропустить и задать позже.[/]"
+                )
+                if not Confirm.ask("Записать telethon_default_api в settings.json?", default=True):
+                    continue
+                aid_s = strip_c0_controls(Prompt.ask("api_id").strip())
+                aid = parse_api_id_digits(aid_s)
+                if aid is None:
+                    console.print("[red]Некорректный api_id[/]")
+                    continue
+                ah = strip_c0_controls(Prompt.ask("api_hash").strip())
+                if not ah:
+                    console.print("[red]Пустой api_hash[/]")
+                    continue
+                ok, msg = set_telethon_default_api(aid, ah)
+                console.print(f"[green]Сохранено:[/] {msg}" if ok else f"[red]{msg}[/]")
+            elif sub == "5":
+                with console.status("[bold]Синхронизация сессий…[/]", spinner="dots"):
+                    n, warns = sync_sessions_dir_to_accounts(Settings())
+                console.print(f"[green]Добавлено/обновлено записей в accounts.json:[/] {n}")
+                for w in warns[:12]:
+                    console.print(f"  [yellow]{escape(str(w))}[/]")
+                if len(warns) > 12:
+                    console.print(f"  [dim]… ещё {len(warns) - 12}[/]")
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Прервано.[/]")
+        except Exception as e:
+            console.print(f"[red]Ошибка: {escape(str(e))}[/]")
+        Prompt.ask("\n[dim]Enter — продолжить[/]", default="")
+
+
+def _run_mytelegram_api_placeholder() -> None:
+    """Опциональное получение api с my.telegram.org (фаза 2)."""
+    console.print()
+    console.print("[bold cyan]API my.telegram.org[/] [dim](можно пропустить)[/]")
+    console.print(
+        "[dim]Автоматический вход на сайт и запись api_id/api_hash (Playwright + код из Telegram) — фаза 2. "
+        "Сейчас: ключи вручную в config или [bold]8 → 2[/] → telethon_default_api.[/]"
+    )
+    console.print("  [cyan]0[/]  Назад [dim](не регистрировать сейчас)[/]")
+    console.print("  [cyan]1[/]  Проверить, установлен ли Playwright [dim](для будущего сценария)[/]")
+    sub = Prompt.ask(
+        "Выбор",
+        choices=["0", "1"],
+        default="0",
+    )
+    if sub == "0":
+        return
+    try:
+        import playwright  # noqa: F401
+    except ImportError:
+        console.print(
+            "[yellow]Playwright не установлен.[/] Для будущей автоматизации: "
+            "[dim]pip install playwright[/] и [dim]playwright install chromium[/]"
+        )
+        return
+    console.print("[dim]Реализация сценария будет добавлена позже.[/]")
+
+
+def _run_system_hub_submenu() -> None:
+    """Хаб: импорт, настройки, сессии, опционально API."""
+    while True:
+        console.print()
+        console.print("[bold cyan]Импорты, настройки и аккаунты[/]")
+        console.print(f"{_mi('1')} [bold]Импорт[/]: ZIP с парами .json + .session")
+        console.print(f"{_mi('2')} [bold]Настройки[/]: прокси, telethon_default_api, синхронизация сессий")
+        console.print(f"{_mi('3')} [bold]Сессии Telethon[/]: список, привязка, вход, автопривязка")
+        console.print(f"{_mi('4')} [bold]API my.telegram.org[/] [dim](опционально, можно пропустить)[/]")
+        console.print(f"{_mi('5')} Подготовка аккаунтов: 2FA → прокси → сброс чужих сессий")
         console.print(f"{_mi('0')} Назад в главное меню")
         console.print()
         sub = Prompt.ask(
             "Выбор",
-            choices=["0", "1", "2", "3", "4"],
+            choices=["0", "1", "2", "3", "4", "5"],
             default="0",
         )
         if sub == "0":
             break
         try:
             if sub == "1":
-                _run_assign_proxies()
+                _run_import_zip_interactive()
             elif sub == "2":
-                asyncio.run(_run_check_proxies())
+                _run_settings_submenu()
             elif sub == "3":
                 asyncio.run(run_telethon_session_menu(console))
             elif sub == "4":
+                _run_mytelegram_api_placeholder()
+            elif sub == "5":
                 asyncio.run(run_bulk_account_prepare(console))
         except KeyboardInterrupt:
             console.print("\n[yellow]Прервано.[/]")
@@ -543,10 +693,12 @@ async def _run_scrape(
             "[dim]Отдельная сессия: группы по одной, один и тот же клиент Telethon.[/]"
         )
     else:
-        pool = AccountPool()
-        max_concurrent = max(1, len(pool.accounts))
+        with console.status("[bold]Загрузка пула аккаунтов…[/]", spinner="dots"):
+            pool = AccountPool()
+            max_concurrent = max(1, len(pool.accounts))
+            if (sett.scrape_session_name or "").strip():
+                max_concurrent = 1
         if (sett.scrape_session_name or "").strip():
-            max_concurrent = 1
             console.print(
                 "[dim]Одна закреплённая сессия — группы последовательно (без параллели).[/]"
             )
@@ -1028,9 +1180,10 @@ async def _run_invite() -> None:
     if not Confirm.ask("Продолжить?"):
         return
     mgr = InviteManager()
-    invited, session = await mgr.invite_contacts_to_channel(
-        f"@{channel}", limit=limit, batch_size=10
-    )
+    with console.status("[bold]Приглашение контактов в канал…[/]", spinner="dots"):
+        invited, session = await mgr.invite_contacts_to_channel(
+            f"@{channel}", limit=limit, batch_size=10
+        )
     console.print(f"\n[bold green]Приглашено: {invited} контактов[/] (аккаунт: {session or '—'})")
     Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
 
@@ -1116,7 +1269,8 @@ def _run_assign_proxies() -> None:
 async def _run_purge_users_belarus() -> None:
     """Удалить из SQLite users строки без эвристики «Беларусь»."""
     db = get_db()
-    await db.init()
+    with console_loading(console, "Подключение к базе…"):
+        await db.init()
     n_drop, n_keep = await db.preview_belarus_user_purge()
     total = n_drop + n_keep
     if total == 0:
@@ -1140,16 +1294,93 @@ async def _run_purge_users_belarus() -> None:
         console.print("[dim]Отменено.[/]")
         Prompt.ask("\n[dim]Нажмите Enter…[/]", default="")
         return
-    deleted, kept = await db.purge_users_without_belarus_signals()
+    with console_loading(console, "Удаление записей…"):
+        deleted, kept = await db.purge_users_without_belarus_signals()
     console.print(f"[green]Готово:[/] удалено [bold]{deleted}[/], осталось [bold]{kept}[/].")
+    Prompt.ask("\n[dim]Нажмите Enter…[/]", default="")
+
+
+async def _run_browse_users_db() -> None:
+    """Поиск по username и листинг users порциями."""
+    console.print()
+    console.print("[bold cyan]База пользователей (SQLite)[/]")
+    db = get_db()
+    with console_loading(console, "Загрузка…"):
+        await db.init()
+    cat = Prompt.ask("Категория", choices=["all", "hot", "warm"], default="all")
+    needle = strip_c0_controls(
+        Prompt.ask("Подстрока username [dim](пусто = все; без @)[/]", default="").strip()
+    )
+    needle_arg = needle if needle else None
+
+    async def _refresh_total() -> int:
+        return await db.count_users_search(username_contains=needle_arg, category=cat)
+
+    total = await _refresh_total()
+    console.print(f"[dim]Найдено записей:[/] [bold]{total}[/]")
+    if total == 0:
+        Prompt.ask("\n[dim]Нажмите Enter…[/]", default="")
+        return
+
+    offset = 0
+    page_size = 20
+    while True:
+        rows = await db.list_users_search_page(
+            username_contains=needle_arg,
+            category=cat,
+            offset=offset,
+            limit=page_size,
+        )
+        if not rows:
+            console.print("[dim]Конец списка по текущему фильтру.[/]")
+            break
+        end = min(offset + len(rows), total)
+        table = Table(title=f"users [dim]{offset + 1}–{end} из {total}[/]")
+        table.add_column("id", style="dim", width=7)
+        table.add_column("username", style="cyan", max_width=28)
+        table.add_column("telegram_id", style="dim", max_width=14)
+        table.add_column("cat", width=6)
+        table.add_column("first_seen", style="dim", max_width=20)
+        for r in rows:
+            fs = (r.get("first_seen_at") or "")[:19]
+            table.add_row(
+                str(r.get("id")),
+                str(r.get("username") or "—"),
+                str(r.get("telegram_id") or "—"),
+                str(r.get("category") or "—"),
+                fs,
+            )
+        console.print(table)
+        console.print(
+            "[dim]Enter — следующие 20 · введите новую подстроку username — новый поиск · q — выход[/]"
+        )
+        nxt = strip_c0_controls(Prompt.ask("Далее", default="").strip())
+        low = nxt.lower()
+        if low in ("q", "quit", "й", "exit"):
+            break
+        if nxt:
+            needle = nxt.lstrip("@")
+            needle_arg = needle if needle else None
+            total = await _refresh_total()
+            console.print(f"[dim]Найдено записей:[/] [bold]{total}[/]")
+            offset = 0
+            if total == 0:
+                break
+            continue
+        offset += page_size
+        if offset >= total:
+            console.print("[dim]Все записи показаны.[/]")
+            break
+
     Prompt.ask("\n[dim]Нажмите Enter…[/]", default="")
 
 
 async def _run_stats() -> None:
     """Статистика базы."""
     db = get_db()
-    await db.init()
-    hot, warm = await db.count_users()
+    with console_loading(console, "Статистика…"):
+        await db.init()
+        hot, warm = await db.count_users()
 
     # Найденные группы
     found_groups_path = Path("output") / "found_groups.json"
@@ -1307,7 +1538,9 @@ def run_menu() -> None:
             elif choice == "a":
                 asyncio.run(_run_purge_users_belarus())
             elif choice == "8":
-                _run_proxy_session_submenu()
+                _run_system_hub_submenu()
+            elif choice == "b":
+                asyncio.run(_run_browse_users_db())
         except KeyboardInterrupt:
             console.print("\n[yellow]Прервано.[/]")
         except Exception as e:
