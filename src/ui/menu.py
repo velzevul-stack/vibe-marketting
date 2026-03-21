@@ -870,10 +870,20 @@ async def _add_contacts_workflow(
     db = get_db()
     await db.init()
     cat = Prompt.ask("Категория (hot/warm/all)", choices=["hot", "warm", "all"], default="hot")
+    console.print()
+    console.print("[bold]Кого брать из базы?[/]")
+    console.print(
+        f"{_mi('1')} Только [bold]не[/] помеченных «в контактах» [dim](в БД пусто — ещё не проходили п.4)[/]"
+    )
+    console.print(
+        f"{_mi('2')} [bold]Всех[/] в категории [dim](и помеченных, и нет — повтор AddContact в Telegram обычно безвреден)[/]"
+    )
+    scope = Prompt.ask("Выбор", choices=["1", "2"], default="1")
+    exclude_added = scope == "1"
     users = await db.get_users(
         category=cat if cat != "all" else None,
         limit=50,
-        exclude_added_to_contacts=True,
+        exclude_added_to_contacts=exclude_added,
     )
     if not users:
         console.print("[yellow]Нет пользователей для добавления.[/]")
