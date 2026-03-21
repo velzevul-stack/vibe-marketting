@@ -340,7 +340,7 @@ def _render_main_menu() -> str:
     console.print()
     console.print("[bold]Действия в Telegram[/]")
     console.print(f"{_mi('3')} Вступить в группы")
-    console.print(f"{_mi('4')} Добавить в контакты")
+    console.print(f"{_mi('4')} Добавить в контакты [dim](один аккаунт или пул)[/]")
     console.print(f"{_mi('5')} Пригласить в канал")
     console.print()
     console.print(f"{_mi('8')} Прокси, сессии и аккаунты…")
@@ -857,6 +857,43 @@ async def _run_join_groups() -> None:
 
 async def _run_add_contacts() -> None:
     """Добавить в контакты."""
+    console.print()
+    console.print("[bold cyan]Добавить в контакты[/]")
+    console.print(
+        f"{_mi('1')} [bold]Один аккаунт[/]: выбрать из [dim]accounts.json[/] — все добавления только с этой сессии"
+    )
+    console.print(f"{_mi('2')} [bold]Пул[/]: ротация аккаунтов (как раньше)")
+    console.print(f"{_mi('0')} Отмена")
+    mode = Prompt.ask("Выбор", choices=["0", "1", "2"], default="2")
+    if mode == "0":
+        return
+
+    fixed_session: str | None = None
+    if mode == "1":
+        accs = load_accounts()
+        if not accs:
+            console.print(
+                "[red]Нет аккаунтов в accounts.json.[/] Добавьте сессию: главное меню → 8."
+            )
+            return
+        for i, a in enumerate(accs, 1):
+            name = a.get("session_name", "?")
+            console.print(f"  [cyan]{i}[/]  {escape(str(name))}")
+        pick = _prompt_nonneg_int(
+            "Номер аккаунта из списка",
+            default=1,
+            minimum=1,
+            maximum=len(accs),
+        )
+        picked = accs[pick - 1]
+        fixed_session = picked.get("session_name")
+        if not fixed_session:
+            console.print("[red]У записи нет session_name.[/]")
+            return
+        console.print(
+            f"[dim]Контакты будут добавляться с аккаунта[/] [cyan]{escape(str(fixed_session))}[/]"
+        )
+
     db = get_db()
     await db.init()
     cat = Prompt.ask("Категория (hot/warm/all)", choices=["hot", "warm", "all"], default="hot")

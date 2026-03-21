@@ -214,11 +214,15 @@ class InviteManager:
         self.pool = AccountPool()
 
     async def add_to_contacts(self, username: str) -> bool:
-        """Добавить пользователя в контакты."""
+        """Добавить пользователя в контакты (аккаунт — least-used из пула)."""
         state = self.pool.get_best_account()
         if not state:
             return False
-        client = self.pool.get_client(state.session_name)
+        return await self.add_to_contacts_with_session(username, state.session_name)
+
+    async def add_to_contacts_with_session(self, username: str, session_name: str) -> bool:
+        """Добавить пользователя в контакты с указанного аккаунта."""
+        client = self.pool.get_client(session_name)
         if not client:
             return False
         try:
@@ -232,12 +236,12 @@ class InviteManager:
                 last_name="",
                 phone="",
             ))
-            self.pool.mark_used(state.session_name)
+            self.pool.mark_used(session_name)
             return True
         except FloodWaitError as e:
-            self.pool.mark_flood_wait(state.session_name, e.seconds)
+            self.pool.mark_flood_wait(session_name, e.seconds)
             await asyncio.sleep(e.seconds)
-            return await self.add_to_contacts(username)
+            return await self.add_to_contacts_with_session(username, session_name)
         except Exception:
             return False
         finally:
