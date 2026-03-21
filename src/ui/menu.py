@@ -327,7 +327,7 @@ def _load_header_art() -> str:
 
 
 def _render_main_menu() -> str:
-    """Главное меню: пункты 1–9 по порядку, затем a, b; 0 — выход."""
+    """Главное меню: пункты 1–9 по порядку, затем a; 0 — выход."""
     header = _load_header_art()
     try:
         console.print(Panel.fit(header, border_style="cyan"))
@@ -362,16 +362,13 @@ def _render_main_menu() -> str:
     console.print(
         f"{_mk('a')} Очистить список найденных групп [dim](found_groups.json, не БД)[/]"
     )
-    console.print(
-        f"{_mk('b')} Фильтр базы продавцов: удалить записи без признаков РБ [dim](users)[/]"
-    )
     console.print()
     console.print(f"{_mk('0')} Выход")
-    console.print("[dim]Ввод: 1–9, a, b или 0.[/]")
+    console.print("[dim]Ввод: 1–9, a или 0.[/]")
     console.print()
     return Prompt.ask(
         "Выберите действие",
-        choices=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b"],
+        choices=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a"],
         default="0",
     )
 
@@ -519,11 +516,14 @@ def _run_system_hub_submenu() -> None:
         console.print(f"{_mk('3')} Сессии Telethon [dim](список, привязка, вход, автопривязка)[/]")
         console.print(f"{_mk('4')} API my.telegram.org [dim](опционально)[/]")
         console.print(f"{_mk('5')} Подготовка аккаунтов [dim](2FA, прокси, сброс сессий)[/]")
+        console.print(
+            f"{_mk('6')} Фильтр базы продавцов [dim](SQLite users: удалить без признаков РБ)[/]"
+        )
         console.print(f"{_mk('0')} Назад в главное меню")
         console.print()
         sub = Prompt.ask(
             "Выбор",
-            choices=["0", "1", "2", "3", "4", "5"],
+            choices=["0", "1", "2", "3", "4", "5", "6"],
             default="0",
         )
         if sub == "0":
@@ -539,6 +539,8 @@ def _run_system_hub_submenu() -> None:
                 _run_mytelegram_api_placeholder()
             elif sub == "5":
                 asyncio.run(run_bulk_account_prepare(console))
+            elif sub == "6":
+                asyncio.run(_run_purge_users_belarus())
         except KeyboardInterrupt:
             console.print("\n[yellow]Прервано.[/]")
         except Exception as e:
@@ -1650,8 +1652,6 @@ def run_menu() -> None:
                 _run_system_hub_submenu()
             elif choice == "a":
                 _run_clear_found_groups()
-            elif choice == "b":
-                asyncio.run(_run_purge_users_belarus())
         except KeyboardInterrupt:
             console.print("\n[yellow]Прервано.[/]")
         except Exception as e:
