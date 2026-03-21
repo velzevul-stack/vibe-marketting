@@ -359,6 +359,66 @@ class InviteManager:
 
         return False, session_name, last_err or "Не удалось вступить после повторов"
 
+    async def invite_contacts_to_channel_for_session(
+        self,
+        session_name: str,
+        channel_username: str,
+        limit: int,
+        batch_size: int = 10,
+    ) -> tuple[int, str]:
+        """
+        Пригласить в канал до ``limit`` контактов с указанной сессии (батчи ``batch_size``).
+        Между батчами — пауза ``delays.invite_min`` / ``invite_max`` из settings.
+        """
+        if limit <= 0:
+            return 0, session_name
+        client = self.pool.get_client(session_name)
+        if not client:
+            return 0, session_name
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                return 0, session_name
+            result = await client(GetContactsRequest(hash=0))
+            users = getattr(result, "users", []) or []
+            users = [u for u in users if not getattr(u, "bot", False)]
+            users = users[:limit]
+            if not users:
+                return 0, session_name
+            channel = await client.get_entity(channel_username)
+            invited = 0
+            for i in range(0, len(users), batch_size):
+                batch = users[i : i + batch_size]
+                try:
+                    await client(InviteToChannelRequest(channel, batch))
+                    invited += len(batch)
+                    self.pool.mark_used(session_name)
+                except FloodWaitError as e:
+                    self.pool.mark_flood_wait(session_name, e.seconds)
+                    await asyncio.sleep(e.seconds)
+                    try:
+                        await client(InviteToChannelRequest(channel, batch))
+                        invited += len(batch)
+                        self.pool.mark_used(session_name)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                if i + batch_size < len(users):
+                    delay = smart_delay(
+                        self.settings.delay_invite_min,
+                        self.settings.delay_invite_max,
+                    )
+                    await asyncio.sleep(delay)
+            return invited, session_name
+        except Exception:
+            return 0, session_name
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+
     async def invite_contacts_to_channel(
         self, channel_username: str, limit: int = 50, batch_size: int = 10
     ) -> tuple[int, str]:
@@ -370,43 +430,56 @@ class InviteManager:
         state = self.pool.get_best_account()
         if not state:
             return 0, ""
-        client = self.pool.get_client(state.session_name)
-        if not client:
-            return 0, ""
-        try:
-            await client.connect()
-            if not await client.is_user_authorized():
-                return 0, ""
-            result = await client(GetContactsRequest(hash=0))
-            users = getattr(result, "users", []) or []
-            users = [u for u in users if not getattr(u, "bot", False)]
-            users = users[:limit]
-            if not users:
-                return 0, state.session_name
-            channel = await client.get_entity(channel_username)
-            invited = 0
-            for i in range(0, len(users), batch_size):
-                batch = users[i : i + batch_size]
-                try:
-                    await client(InviteToChannelRequest(channel, batch))
-                    invited += len(batch)
-                    self.pool.mark_used(state.session_name)
-                except FloodWaitError as e:
-                    self.pool.mark_flood_wait(state.session_name, e.seconds)
-                    await asyncio.sleep(e.seconds)
-                    try:
-                        await client(InviteToChannelRequest(channel, batch))
-                        invited += len(batch)
-                        self.pool.mark_used(state.session_name)
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
-            return invited, state.session_name
-        except Exception:
-            return 0, state.session_name
-        finally:
-            await client.disconnect()
+        return await self.invite_contacts_to_channel_for_session(
+            state.session_name,
+            channel_username,
+            limit,
+            batch_size=batch_size,
+        )
+
+    async def invite_contacts_to_channel_parallel(
+        self,
+        channel_username: str,
+        total_limit: int,
+        batch_size: int = 10,
+    ) -> tuple[int, list[tuple[str, int]]]:
+        """
+        Параллельно: каждый аккаунт из пула приглашает свою долю контактов (своя адресная книга).
+        ``total_limit`` делится между аккаунтами максимально равномерно.
+        Возвращает (всего приглашено, [(session_name, count), ...]).
+        """
+        session_names = self.pool.session_names_ordered()
+        if not session_names or total_limit <= 0:
+            return 0, []
+
+        n = len(session_names)
+        base, rem = divmod(total_limit, n)
+        quotas: list[tuple[str, int]] = []
+        for i, sn in enumerate(session_names):
+            q = base + (1 if i < rem else 0)
+            if q > 0:
+                quotas.append((sn, q))
+
+        if not quotas:
+            return 0, []
+
+        async def _one(sn_q: tuple[str, int]) -> tuple[str, int]:
+            sn, q = sn_q
+            n_inv, _ = await self.invite_contacts_to_channel_for_session(
+                sn, channel_username, q, batch_size=batch_size
+            )
+            return sn, n_inv
+
+        raw = await asyncio.gather(*(_one(t) for t in quotas), return_exceptions=True)
+        breakdown: list[tuple[str, int]] = []
+        total = 0
+        for item in raw:
+            if isinstance(item, BaseException):
+                continue
+            sn, n_inv = item
+            breakdown.append((sn, n_inv))
+            total += n_inv
+        return total, breakdown
 
     async def invite_to_channel(
         self, channel_username: str, users: list[dict]

@@ -1172,16 +1172,65 @@ async def _run_invite() -> None:
     if not channel:
         console.print("[red]Укажите username канала.[/]")
         return
-    limit = _prompt_nonneg_int("Сколько контактов пригласить", default=20, minimum=1, maximum=10_000)
-    console.print(f"[dim]Берём контакты из аккаунта и добавляем в @{channel}[/]")
+    limit = _prompt_nonneg_int(
+        "Сколько контактов пригласить (всего)",
+        default=20,
+        minimum=1,
+        maximum=10_000,
+    )
+    mgr = InviteManager()
+    sett = mgr.settings
+    session_names = mgr.pool.session_names_ordered()
+    if not session_names:
+        console.print("[red]Нет аккаунтов в accounts.json[/]")
+        return
+
+    parallel = False
+    if len(session_names) > 1:
+        console.print()
+        console.print(f"{_mk('1')} Один аккаунт [dim](least-used из пула)[/]")
+        console.print(
+            f"{_mk('2')} Параллельно — все [bold]{len(session_names)}[/] аккаунтов "
+            f"[dim](лимит {limit} делится между ними поровну; у каждого своя адресная книга; "
+            f"между батчами по {sett.delay_invite_min}–{sett.delay_invite_max} с)[/]"
+        )
+        parallel = Prompt.ask("Режим", choices=["1", "2"], default="2") == "2"
+    else:
+        console.print(
+            f"[dim]Один аккаунт [cyan]{escape(session_names[0])}[/] · канал @{escape(channel)}[/]"
+        )
+
+    if len(session_names) > 1 and not parallel:
+        console.print(
+            f"[dim]Один прогон: контакты с одного аккаунта (least-used) → @{escape(channel)}[/]"
+        )
+    elif parallel:
+        console.print(
+            f"[dim]Параллельно в @{escape(channel)}: суммарно до {limit} приглашений по контактам аккаунтов.[/]"
+        )
+    else:
+        console.print(f"[dim]Контакты аккаунта → @{escape(channel)}[/]")
+
     if not Confirm.ask("Продолжить?"):
         return
-    mgr = InviteManager()
+
     with console.status("[bold]Приглашение контактов в канал…[/]", spinner="dots"):
-        invited, session = await mgr.invite_contacts_to_channel(
-            f"@{channel}", limit=limit, batch_size=10
-        )
-    console.print(f"\n[bold green]Приглашено: {invited} контактов[/] (аккаунт: {session or '—'})")
+        if parallel:
+            invited, breakdown = await mgr.invite_contacts_to_channel_parallel(
+                f"@{channel}", total_limit=limit, batch_size=10
+            )
+        else:
+            invited, session = await mgr.invite_contacts_to_channel(
+                f"@{channel}", limit=limit, batch_size=10
+            )
+            breakdown = [(session, invited)] if session else []
+
+    console.print(f"\n[bold green]Приглашено: {invited} контактов[/]")
+    if parallel:
+        for sn, n in breakdown:
+            console.print(f"  [dim]{escape(str(sn))}:[/] [white]{n}[/]")
+    elif breakdown and breakdown[0][0]:
+        console.print(f"  [dim]аккаунт:[/] [white]{escape(str(breakdown[0][0]))}[/]")
     Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
 
 
