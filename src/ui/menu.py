@@ -528,6 +528,10 @@ async def _run_scrape(
 
     console.print(f"[bold blue]Сбор базы из {len(groups)} групп[/]")
     limit = _prompt_nonneg_int("Лимит сообщений на группу", default=300, minimum=1, maximum=500_000)
+    if fixed_client is not None:
+        console.print(
+            "[dim]Между строками прогресса возможна пауза: Telegram отдаёт историю не мгновенно.[/]"
+        )
 
     if fixed_client is not None:
         pool = None
@@ -556,7 +560,11 @@ async def _run_scrape(
             try:
                 def on_progress(cur, tot):
                     pct = (cur / tot * 100) if tot else 0
-                    console.print(f"  [dim]{escape(str(title))}: {cur}/{tot} ({pct:.1f}%)[/]", end="\r")
+                    line = f"  [dim]{escape(str(title))}: {cur}/{tot} ({pct:.1f}%)[/]"
+                    if cur == 1 or cur % 50 == 0 or cur >= tot:
+                        console.print(line)
+                    else:
+                        console.print(line, end="\r")
                 hot, warm = await scrape_group(
                     raw_link,
                     limit=limit,
@@ -590,7 +598,8 @@ async def _run_scrape_single_account_branch() -> None:
         f"{_mi('1')} [bold]Общий[/]: выбрать аккаунт из accounts.json — сбор [bold]без прокси[/] (только этот session)"
     )
     console.print(
-        f"{_mi('2')} [bold]Отдельный[/]: вход в консоли (api, телефон, код, 2FA), затем вопрос про прокси"
+        f"{_mi('2')} [bold]Отдельный[/]: вход в консоли (api, телефон, код, 2FA); прокси — при входе и "
+        f"повторно перед сбором (в т.ч. для сохранённой сессии)"
     )
     console.print(f"{_mi('0')} Назад")
     ch = Prompt.ask("Выбор", choices=["0", "1", "2"], default="0")

@@ -2,6 +2,8 @@
 import asyncio
 import re
 
+from rich.console import Console
+from rich.markup import escape
 from telethon import TelegramClient
 from telethon.errors import (
     ChannelInvalidError,
@@ -17,6 +19,8 @@ from src.config import Settings
 from src.db import get_db
 from src.invite.manager import AccountPool
 from src.verify.parser import extract_sellers
+
+_console = Console()
 
 # Публичный @username Telegram: буква/цифра/_, обычно от 5 символов; допускаем 4 для старых ников.
 _USERNAME_SLUG = re.compile(r"^[A-Za-z0-9_]{4,}$")
@@ -120,22 +124,45 @@ async def scrape_group(
 
     hot_count = 0
     warm_count = 0
+    external_client = client is not None and not own_client
 
     try:
         while True:
             try:
+                if external_client:
+                    _console.print(f"[dim]  → Подключение к Telegram…[/] [cyan]{escape(ref)}[/]")
                 await client.connect()
                 if not await client.is_user_authorized():
+                    if external_client:
+                        _console.print("[red]  → Сессия не авторизована, сбор пропущен.[/]")
                     return 0, 0
 
+                if external_client:
+                    _console.print("[dim]  → Запрос чата (get_entity), подождите…[/]")
                 entity = await client.get_entity(ref)
                 chat_id = str(getattr(entity, "id", "") or entity)
+                chat_label = (
+                    getattr(entity, "title", None)
+                    or getattr(entity, "username", None)
+                    or chat_id
+                )
+                if external_client:
+                    _console.print(
+                        f"[dim]  → Чат:[/] [white]{escape(str(chat_label))}[/] "
+                        f"[dim]· чтение до {limit} сообщений (первое сообщение с сервера может идти долго)…[/]"
+                    )
                 processed = 0
 
                 async for message in client.iter_messages(entity, limit=limit):
                     processed += 1
                     if on_progress:
                         on_progress(processed, limit)
+                    if external_client and not on_progress and (
+                        processed == 1 or processed % 50 == 0
+                    ):
+                        _console.print(
+                            f"[dim]  … сообщений обработано:[/] [cyan]{processed}[/][dim]/{limit}[/]"
+                        )
 
                     text = message.text or ""
                     sender = message.sender
@@ -181,6 +208,11 @@ async def scrape_group(
             except FloodWaitError as e:
                 if acc_pool is not None and session_for_flood:
                     acc_pool.mark_flood_wait(session_for_flood, e.seconds)
+                sess = escape(str(session_for_flood)) if session_for_flood else "отдельный вход"
+                _console.print(
+                    f"\n[yellow]FloodWait:[/] пауза [bold]{e.seconds}[/] с "
+                    f"([dim]сессия[/] [cyan]{sess}[/])"
+                )
                 await asyncio.sleep(e.seconds)
                 continue
             except (

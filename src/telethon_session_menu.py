@@ -1,7 +1,10 @@
 """Консоль: сессии Telethon (.session) и accounts.json."""
+from __future__ import annotations
+
 import secrets
 import shutil
 from pathlib import Path
+from urllib.parse import urlparse
 
 from rich.prompt import Prompt, Confirm
 from rich.table import Table
@@ -28,6 +31,108 @@ def _session_dir_label() -> str:
 
 def _sessions_dir() -> Path:
     return telethon_session_dir_path()
+
+
+def prompt_yes_no(console, question: str, *, default: bool = True) -> bool:
+    """Да/нет: y/n, д/н, да/нет (латиница и кириллица)."""
+    hint = "[Y/n]" if default else "[y/N]"
+    dflt = "y" if default else "n"
+    while True:
+        raw = Prompt.ask(f"{question} {hint}", default=dflt, console=console)
+        s = strip_c0_controls(raw or "").strip().lower()
+        if not s:
+            return default
+        if s in ("y", "yes", "д", "да", "1", "+"):
+            return True
+        if s in ("n", "no", "н", "нет", "0", "-"):
+            return False
+        console.print("[dim]Введите y или n (или д/н, да/нет).[/]")
+
+
+def _redact_proxy_url(url: str | None) -> str:
+    if not url:
+        return "нет (прямое подключение к Telegram)"
+    try:
+        p = urlparse(url)
+        host = p.hostname or "?"
+        port = f":{p.port}" if p.port else ""
+        return f"{p.scheme}://***@{host}{port}" if p.username or p.password else f"{p.scheme}://{host}{port}"
+    except Exception:
+        return "задан (скрыто)"
+
+
+async def offer_ephemeral_scrape_proxy_reconfigure(
+    console,
+    client: TelegramClient,
+    *,
+    session_base: str,
+    api_id: int,
+    api_hash: str,
+    current_proxy_url: str | None,
+) -> tuple[TelegramClient, str | None]:
+    """
+    После успешного отдельного входа: показать текущий прокси и опционально переподключить клиент.
+    При ошибке с новым прокси пытается вернуть прежние настройки.
+    """
+    from telethon import TelegramClient as TC
+
+    console.print(f"[dim]Прокси для этого сбора:[/] [cyan]{_redact_proxy_url(current_proxy_url)}[/]")
+    if not prompt_yes_no(console, "Сменить прокси перед сбором?", default=False):
+        return client, current_proxy_url
+
+    raw = strip_c0_controls(
+        Prompt.ask(
+            "Прокси URL (socks5:// или http://), пусто — без прокси",
+            default="",
+            console=console,
+        ).strip()
+    )
+    new_proxy: str | None = None
+    if raw and not is_placeholder_proxy_url(raw):
+        new_proxy = raw
+
+    try:
+        await client.disconnect()
+    except Exception:
+        pass
+
+    proxy_tg = proxy_url_to_telethon(new_proxy)
+    new_client = TC(session_base, api_id, api_hash, proxy=proxy_tg)
+    try:
+        await new_client.connect()
+        if not await new_client.is_user_authorized():
+            console.print("[red]С новым прокси сессия не авторизована. Восстанавливаю прежнее подключение…[/]")
+            try:
+                await new_client.disconnect()
+            except Exception:
+                pass
+            proxy_old = proxy_url_to_telethon(current_proxy_url)
+            restored = TC(session_base, api_id, api_hash, proxy=proxy_old)
+            await restored.connect()
+            if await restored.is_user_authorized():
+                console.print("[yellow]Оставлен прокси как до смены.[/]")
+                return restored, current_proxy_url
+            console.print("[red]Не удалось восстановить сессию. Проверьте сеть и прокси вручную.[/]")
+            return restored, current_proxy_url
+        console.print("[green]Прокси обновлён, сессия активна.[/]")
+        return new_client, new_proxy
+    except Exception as e:
+        console.print(f"[red]Ошибка подключения с новым прокси: {e}[/]")
+        try:
+            await new_client.disconnect()
+        except Exception:
+            pass
+        proxy_old = proxy_url_to_telethon(current_proxy_url)
+        restored = TC(session_base, api_id, api_hash, proxy=proxy_old)
+        try:
+            await restored.connect()
+            if await restored.is_user_authorized():
+                console.print("[yellow]Возврат к прежнему прокси.[/]")
+                return restored, current_proxy_url
+        except Exception:
+            pass
+        console.print("[red]Не удалось переподключиться. Запустите сценарий входа снова.[/]")
+        return restored, current_proxy_url
 
 
 def _unique_session_stem_from_phone(phone: str) -> str:
@@ -254,11 +359,11 @@ async def login_client_for_one_off_scrape(console):
         sess_file = _sessions_dir() / f"{sn}.session"
         if sess_file.is_file():
             tail = str(last["api_id"])[-4:]
-            if Confirm.ask(
-                f"Использовать предыдущий отдельный вход? "
-                f"(сессия [cyan]{sn}[/], тот же api_id/api_hash; файл .session на месте, окончание api_id …{tail})",
-                default=True,
-            ):
+            console.print(
+                f"[dim]Предыдущий отдельный вход:[/] сессия [cyan]{sn}[/], api_id …{tail}, "
+                f"файл [cyan]{sess_file.name}[/] на месте."
+            )
+            if prompt_yes_no(console, "Использовать эту сессию?", default=True):
                 api_id = int(last["api_id"])
                 api_hash = str(last["api_hash"])
                 proxy_raw = last.get("proxy_url")
@@ -277,6 +382,14 @@ async def login_client_for_one_off_scrape(console):
                         me = await client.get_me()
                         console.print(
                             f"[green]Уже авторизовано: {getattr(me, 'username', None) or me.id}[/]"
+                        )
+                        client, proxy_url = await offer_ephemeral_scrape_proxy_reconfigure(
+                            console,
+                            client,
+                            session_base=session_base,
+                            api_id=api_id,
+                            api_hash=api_hash,
+                            current_proxy_url=proxy_url,
                         )
                         meta = {
                             "session_name": sn,
@@ -311,6 +424,14 @@ async def login_client_for_one_off_scrape(console):
                         return None
                     me = await client.get_me()
                     console.print(f"[green]Авторизовано: {getattr(me, 'username', None) or me.id}[/]")
+                    client, proxy_url = await offer_ephemeral_scrape_proxy_reconfigure(
+                        console,
+                        client,
+                        session_base=session_base,
+                        api_id=api_id,
+                        api_hash=api_hash,
+                        current_proxy_url=proxy_url,
+                    )
                     meta = {
                         "session_name": sn,
                         "api_id": api_id,
@@ -349,8 +470,10 @@ async def login_client_for_one_off_scrape(console):
         return None
 
     proxy_url = None
-    if Confirm.ask("Использовать прокси для Telegram (этот сбор)?", default=False):
-        raw = strip_c0_controls(Prompt.ask("Прокси URL (socks5:// или http://)", default="").strip())
+    if prompt_yes_no(console, "Использовать прокси для Telegram (этот сбор)?", default=False):
+        raw = strip_c0_controls(
+            Prompt.ask("Прокси URL (socks5:// или http://)", default="", console=console).strip()
+        )
         if raw and not is_placeholder_proxy_url(raw):
             proxy_url = raw
 
@@ -381,6 +504,14 @@ async def login_client_for_one_off_scrape(console):
             pass
         return None
 
+    client, proxy_url = await offer_ephemeral_scrape_proxy_reconfigure(
+        console,
+        client,
+        session_base=session_base,
+        api_id=api_id,
+        api_hash=api_hash,
+        current_proxy_url=proxy_url,
+    )
     meta = {
         "session_name": session_name,
         "api_id": api_id,
@@ -404,7 +535,7 @@ def _ask_api_id_hash_or_defaults(console, settings: Settings) -> tuple[int, str]
     hsh = settings.default_telethon_api_hash
     if aid is not None and hsh:
         console.print(f"[dim]В settings.json (telethon_default_api): api_id={aid}[/]")
-        if Confirm.ask("Использовать этот api_id и api_hash?", default=True):
+        if prompt_yes_no(console, "Использовать этот api_id и api_hash?", default=True):
             return aid, hsh
     console.print(
         "[dim]Можно задать постоянно в settings.json → telethon_default_api "
