@@ -1,5 +1,4 @@
 """Консоль: сессии Telethon (.session) и accounts.json."""
-import re
 import secrets
 import shutil
 from pathlib import Path
@@ -7,6 +6,7 @@ from pathlib import Path
 from rich.prompt import Prompt, Confirm
 from rich.table import Table
 
+from src.cli_input import digits_only, parse_api_id_digits, strip_c0_controls
 from src.config import (
     Settings,
     accounts_json_path,
@@ -29,22 +29,11 @@ def _sessions_dir() -> Path:
     return telethon_session_dir_path()
 
 
-def _parse_api_id(raw: str) -> int | None:
-    """api_id из строки; убирает управляющие символы (^H) и прочее, оставляет цифры."""
-    digits = re.sub(r"\D", "", raw or "")
-    if not digits:
-        return None
-    try:
-        return int(digits)
-    except ValueError:
-        return None
-
-
 def _unique_session_stem_from_phone(phone: str) -> str:
     """
     Имя файла без расширения для .session (локально на диске, не @username в Telegram).
     """
-    digits = re.sub(r"\D", "", phone or "")
+    digits = digits_only(phone)
     tail = digits[-8:] if len(digits) >= 4 else (digits or "user")
     base = f"tg_{tail}"
     d = _sessions_dir()
@@ -106,9 +95,11 @@ async def _list_sessions_console(console) -> None:
 
 
 async def _bind_session_console(console) -> None:
-    raw = Prompt.ask(
-        f"Путь к .session или имя без расширения (если файл уже в {_session_dir_label()}/)",
-    ).strip()
+    raw = strip_c0_controls(
+        Prompt.ask(
+            f"Путь к .session или имя без расширения (если файл уже в {_session_dir_label()}/)",
+        ).strip()
+    )
     if not raw:
         return
     p = Path(raw)
@@ -129,14 +120,14 @@ async def _bind_session_console(console) -> None:
             )
             return
 
-    api_id_s = Prompt.ask("api_id (число с my.telegram.org)").strip()
-    api_hash = Prompt.ask("api_hash").strip()
-    api_id = _parse_api_id(api_id_s)
+    api_id_s = strip_c0_controls(Prompt.ask("api_id (число с my.telegram.org)").strip())
+    api_hash = strip_c0_controls(Prompt.ask("api_hash").strip())
+    api_id = parse_api_id_digits(api_id_s)
     if api_id is None:
         console.print("[red]api_id должен быть числом[/]")
         return
-    phone = Prompt.ask("Телефон (опционально)", default="").strip() or None
-    proxy = Prompt.ask("Прокси URL (опционально)", default="").strip() or None
+    phone = strip_c0_controls(Prompt.ask("Телефон (опционально)", default="").strip()) or None
+    proxy = strip_c0_controls(Prompt.ask("Прокси URL (опционально)", default="").strip()) or None
 
     if Confirm.ask(f"Добавить/обновить аккаунт «{session_name}» в accounts.json?", default=True):
         _append_account(session_name, api_id, api_hash, phone=phone, proxy=proxy)
@@ -147,24 +138,28 @@ async def _new_login_console(console) -> None:
     from telethon import TelegramClient
     from telethon.errors import SessionPasswordNeededError
 
-    api_id_s = Prompt.ask("api_id").strip()
-    api_id = _parse_api_id(api_id_s)
+    api_id_s = strip_c0_controls(Prompt.ask("api_id").strip())
+    api_id = parse_api_id_digits(api_id_s)
     if api_id is None:
         console.print("[red]api_id должен быть числом[/]")
         return
-    api_hash = Prompt.ask("api_hash").strip()
-    phone = Prompt.ask(
-        "Телефон в международном формате (+код страны, напр. +375…, +7…, +95…)"
-    ).strip()
+    api_hash = strip_c0_controls(Prompt.ask("api_hash").strip())
+    phone = strip_c0_controls(
+        Prompt.ask(
+            "Телефон в международном формате (+код страны, напр. +375…, +7…, +95…)"
+        ).strip()
+    )
     if not phone:
         console.print("[red]Нужен телефон[/]")
         return
 
     auto_name = _unique_session_stem_from_phone(phone)
-    session_name = Prompt.ask(
-        f"Имя файла в {_session_dir_label()}/ (Enter = автоматически: {auto_name})",
-        default=auto_name,
-    ).strip()
+    session_name = strip_c0_controls(
+        Prompt.ask(
+            f"Имя файла в {_session_dir_label()}/ (Enter = автоматически: {auto_name})",
+            default=auto_name,
+        ).strip()
+    )
     if not session_name or "/" in session_name or "\\" in session_name:
         session_name = auto_name
 
@@ -172,7 +167,7 @@ async def _new_login_console(console) -> None:
     session_base = str(_sessions_dir() / session_name)
 
     def code_cb() -> str:
-        return Prompt.ask("Код из Telegram (SMS или приложение)")
+        return digits_only(Prompt.ask("Код из Telegram (SMS или приложение)"))
 
     def password_cb() -> str:
         # Без ручного ввода: settings или дефолт из config
@@ -202,7 +197,7 @@ async def _new_login_console(console) -> None:
             pass
         return
 
-    proxy = Prompt.ask("Прокси URL (опционально)", default="").strip() or None
+    proxy = strip_c0_controls(Prompt.ask("Прокси URL (опционально)", default="").strip()) or None
     if Confirm.ask("Записать аккаунт в accounts.json?", default=True):
         _append_account(session_name, api_id, api_hash, phone=phone, proxy=proxy)
         console.print(f"[green]Сохранено в {accounts_json_path()}[/]")
@@ -225,16 +220,18 @@ async def login_client_for_one_off_scrape(console):
         return None
     api_id, api_hash = pair
 
-    phone = Prompt.ask(
-        "Телефон в международном формате (+код страны, напр. +375…, +7…, +95…)"
-    ).strip()
+    phone = strip_c0_controls(
+        Prompt.ask(
+            "Телефон в международном формате (+код страны, напр. +375…, +7…, +95…)"
+        ).strip()
+    )
     if not phone:
         console.print("[red]Нужен телефон[/]")
         return None
 
     proxy_url: str | None = None
     if Confirm.ask("Использовать прокси для Telegram (этот сбор)?", default=False):
-        raw = Prompt.ask("Прокси URL (socks5:// или http://)", default="").strip()
+        raw = strip_c0_controls(Prompt.ask("Прокси URL (socks5:// или http://)", default="").strip())
         if raw and not is_placeholder_proxy_url(raw):
             proxy_url = raw
 
@@ -250,13 +247,15 @@ async def login_client_for_one_off_scrape(console):
     session_base = str(_sessions_dir() / session_name)
 
     def code_cb() -> str:
-        return Prompt.ask("Код из Telegram (SMS или приложение)")
+        return digits_only(Prompt.ask("Код из Telegram (SMS или приложение)"))
 
     def password_cb() -> str:
-        manual = Prompt.ask(
-            "Пароль облачного 2FA (или Enter — взять из settings / встроенный дефолт)",
-            default="",
-        ).strip()
+        manual = strip_c0_controls(
+            Prompt.ask(
+                "Пароль облачного 2FA (или Enter — взять из settings / встроенный дефолт)",
+                default="",
+            ).strip()
+        )
         if manual:
             return manual
         return effective_2fa_password(settings)
@@ -306,11 +305,11 @@ def _ask_api_id_hash_or_defaults(console, settings: Settings) -> tuple[int, str]
         "[dim]Можно задать постоянно в settings.json → telethon_default_api "
         "(см. settings.json.example).[/]"
     )
-    aid = _parse_api_id(Prompt.ask("api_id (my.telegram.org)").strip())
+    aid = parse_api_id_digits(strip_c0_controls(Prompt.ask("api_id (my.telegram.org)").strip()))
     if aid is None:
         console.print("[red]Некорректный api_id[/]")
         return None
-    hsh = Prompt.ask("api_hash").strip()
+    hsh = strip_c0_controls(Prompt.ask("api_hash").strip())
     if not hsh:
         console.print("[red]Пустой api_hash[/]")
         return None

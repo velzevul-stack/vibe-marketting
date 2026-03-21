@@ -4,6 +4,8 @@ import re
 from pathlib import Path
 from urllib.parse import quote, unquote, urlparse
 
+from src.cli_input import digits_only
+
 
 def _config_dir() -> Path:
     return Path(__file__).parent.parent / "config"
@@ -646,8 +648,11 @@ def parse_session_bind_line(line: str) -> dict | None:
         return None
     name, aid_s, ahash = parts[0].strip(), parts[1].strip(), parts[2].strip()
     phone = parts[3].strip() if len(parts) > 3 else None
+    aid_digits = digits_only(aid_s)
+    if not aid_digits:
+        return None
     try:
-        api_id = int(aid_s)
+        api_id = int(aid_digits)
     except ValueError:
         return None
     if not name or not ahash:

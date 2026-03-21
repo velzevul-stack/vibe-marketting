@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from src.cli_input import digits_only
 from src.config import (
     Settings,
     load_accounts,
@@ -27,8 +28,12 @@ def _pick_api_from_dict(d: dict) -> tuple[int | None, str | None]:
     ]
     for ik, hk in pairs:
         if ik in d and hk in d and d[hk] is not None:
+            raw_id = d[ik]
+            ds = digits_only(str(raw_id) if raw_id is not None else "")
+            if not ds:
+                continue
             try:
-                aid = int(d[ik])
+                aid = int(ds)
                 h = str(d[hk]).strip()
                 if h:
                     return aid, h

@@ -2,7 +2,6 @@
 import asyncio
 import json
 import random
-import re
 import sys
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -37,6 +36,7 @@ from src.invite import InviteManager, AccountPool
 from src.telethon_session_menu import login_client_for_one_off_scrape, run_telethon_session_menu
 from src.accounts_bulk_prepare import run_bulk_account_prepare
 from src.session_sync import sync_sessions_dir_to_accounts
+from src.cli_input import parse_nonneg_int_clamped, strip_c0_controls
 
 console = Console()
 
@@ -56,19 +56,13 @@ def _prompt_nonneg_int(
     оставляем только цифры, иначе берём default.
     """
     raw = Prompt.ask(message, default=str(default))
-    digits = re.sub(r"\D", "", raw or "")
-    if not digits:
-        n = default
-    else:
-        n = int(digits)
-    lo = 0 if allow_zero else 1
-    if minimum is not None:
-        lo = minimum
-    if n < lo:
-        n = default if default >= lo else lo
-    if maximum is not None and n > maximum:
-        n = maximum
-    return n
+    return parse_nonneg_int_clamped(
+        raw,
+        default=default,
+        allow_zero=allow_zero,
+        minimum=minimum,
+        maximum=maximum,
+    )
 
 
 def _emit_zero_search_diagnostics(search_diag: dict, search_fail: str | None) -> None:
@@ -254,7 +248,7 @@ def _prompt_groups_list_source(action_title: str) -> list[dict] | None:
 
     if ch == "3":
         default_s = str(gl_path)
-        raw = Prompt.ask("Полный путь к .txt", default=default_s).strip()
+        raw = strip_c0_controls(Prompt.ask("Полный путь к .txt", default=default_s).strip())
         p = Path(raw).expanduser()
         if not p.is_file():
             console.print(f"[red]Файл не найден: {escape(str(p))}[/]")
@@ -609,15 +603,13 @@ async def _run_scrape_single_account_branch() -> None:
         for i, a in enumerate(accs, 1):
             name = a.get("session_name", "?")
             console.print(f"  [cyan]{i}[/]  {escape(str(name))}")
-        idx_s = Prompt.ask("Номер аккаунта", default="1").strip()
-        try:
-            idx = int(idx_s) - 1
-        except ValueError:
-            console.print("[red]Нужен номер из списка.[/]")
-            return
-        if idx < 0 or idx >= len(accs):
-            console.print("[red]Нет такого номера.[/]")
-            return
+        pick = _prompt_nonneg_int(
+            "Номер аккаунта из списка",
+            default=1,
+            minimum=1,
+            maximum=len(accs),
+        )
+        idx = pick - 1
         picked = accs[idx]
         name = picked.get("session_name")
         if not name:
@@ -890,7 +882,7 @@ async def _run_add_contacts() -> None:
 
 async def _run_invite() -> None:
     """Пригласить в канал — напрямую из контактов аккаунта."""
-    channel = Prompt.ask("Username канала/группы (например @channel)")
+    channel = strip_c0_controls(Prompt.ask("Username канала/группы (например @channel)").strip())
     channel = channel.lstrip("@").strip()
     if not channel:
         console.print("[red]Укажите username канала.[/]")
