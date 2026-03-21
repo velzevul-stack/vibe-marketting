@@ -22,7 +22,7 @@ pip install -r requirements.txt
 
 2. Заполните `config/accounts.json`:
    - `api_id`, `api_hash` — получите на [my.telegram.org](https://my.telegram.org)
-   - `phone` — номер в формате +375291234567
+   - `phone` — номер в международном формате с `+` и кодом страны (например +375…, +7…, +95…)
 
 3. (Опционально) Настройте прокси — см. [PROXY_AND_ACCOUNTS.md](PROXY_AND_ACCOUNTS.md)
 

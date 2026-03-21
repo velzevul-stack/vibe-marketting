@@ -2,6 +2,7 @@
 import asyncio
 import json
 import random
+import re
 import sys
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -40,6 +41,34 @@ from src.session_sync import sync_sessions_dir_to_accounts
 console = Console()
 
 _FOUND_GROUPS_PREVIOUS = Path("output") / "found_groups.previous.json"
+
+
+def _prompt_nonneg_int(
+    message: str,
+    default: int,
+    *,
+    allow_zero: bool = False,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
+    """
+    Читает неотрицательное целое из консоли. В SSH/backspace часто даёт «^H» в строке —
+    оставляем только цифры, иначе берём default.
+    """
+    raw = Prompt.ask(message, default=str(default))
+    digits = re.sub(r"\D", "", raw or "")
+    if not digits:
+        n = default
+    else:
+        n = int(digits)
+    lo = 0 if allow_zero else 1
+    if minimum is not None:
+        lo = minimum
+    if n < lo:
+        n = default if default >= lo else lo
+    if maximum is not None and n > maximum:
+        n = maximum
+    return n
 
 
 def _emit_zero_search_diagnostics(search_diag: dict, search_fail: str | None) -> None:
@@ -196,6 +225,7 @@ def _prompt_groups_list_source(action_title: str) -> list[dict] | None:
     ch = Prompt.ask("Выбор", choices=["0", "1", "2", "3", "4"], default="1")
 
     if ch == "0":
+        console.print("[dim]Отмена: список групп не выбран.[/]")
         return None
 
     if ch == "1":
@@ -495,10 +525,15 @@ async def _run_scrape(
 
     groups = _prompt_groups_list_source("Сбор базы пользователей")
     if not groups:
+        console.print(
+            "[yellow]Сбор не запущен:[/] нет списка групп, пустой [dim]found_groups.json[/], "
+            "отмена ([cyan]0[/]) или ошибка файла. "
+            "Нужен [bold]п.1[/] главного меню (поиск) или [bold]п.2[/] в этом запросе — [dim]group_links.txt[/] со ссылками [dim]t.me[/]."
+        )
         return
 
     console.print(f"[bold blue]Сбор базы из {len(groups)} групп[/]")
-    limit = int(Prompt.ask("Лимит сообщений на группу", default="300"))
+    limit = _prompt_nonneg_int("Лимит сообщений на группу", default=300, minimum=1, maximum=500_000)
 
     if fixed_client is not None:
         pool = None
@@ -599,6 +634,13 @@ async def _run_scrape_single_account_branch() -> None:
     if not logged:
         return
     client, meta = logged
+    console.print()
+    console.print(
+        "[bold green]Вход в Telegram выполнен.[/]\n"
+        "[dim]Сканирование не начинается само:[/] дальше тот же шаг, что и при обычном сборе — "
+        "[bold]откуда брать группы[/]. Укажите [cyan]1[/] если есть [dim]output/found_groups.json[/] "
+        "после поиска (главное меню → [cyan]1[/]), или [cyan]2[/]/[cyan]3[/] — txt со ссылками [dim]t.me[/] на строку."
+    )
     sett = Settings()
     try:
         await _run_scrape(sett, fixed_client=client)
@@ -655,7 +697,12 @@ async def _run_join_groups() -> None:
     groups = _prompt_groups_list_source("Вступление в группы")
     if not groups:
         return
-    count = int(Prompt.ask("Сколько групп обработать", default=str(min(10, len(groups)))))
+    count = _prompt_nonneg_int(
+        "Сколько групп обработать",
+        default=min(10, len(groups)),
+        minimum=1,
+        maximum=len(groups),
+    )
     groups = groups[:count]
     valid = [g for g in groups if _join_group_link(g)]
     if not valid:
@@ -817,7 +864,12 @@ async def _run_add_contacts() -> None:
     if not users:
         console.print("[yellow]Нет пользователей для добавления.[/]")
         return
-    count = int(Prompt.ask("Сколько добавить", default=str(min(10, len(users)))))
+    count = _prompt_nonneg_int(
+        "Сколько добавить",
+        default=min(10, len(users)),
+        minimum=1,
+        maximum=len(users),
+    )
     users = users[:count]
     mgr = InviteManager()
     for u in users:
@@ -843,7 +895,7 @@ async def _run_invite() -> None:
     if not channel:
         console.print("[red]Укажите username канала.[/]")
         return
-    limit = int(Prompt.ask("Сколько контактов пригласить", default="20"))
+    limit = _prompt_nonneg_int("Сколько контактов пригласить", default=20, minimum=1, maximum=10_000)
     console.print(f"[dim]Берём контакты из аккаунта и добавляем в @{channel}[/]")
     if not Confirm.ask("Продолжить?"):
         return
@@ -1014,7 +1066,7 @@ def _run_view_groups() -> None:
     if not isinstance(groups, list) or not groups:
         console.print("[yellow]Список групп пуст.[/]")
         return
-    limit = int(Prompt.ask("Сколько показать (0 = все)", default="30"))
+    limit = _prompt_nonneg_int("Сколько показать (0 = все)", default=30, allow_zero=True, minimum=0)
     if limit <= 0:
         limit = len(groups)
     show = groups[:limit]

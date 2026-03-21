@@ -120,7 +120,7 @@ cp config/accounts.json.example config/accounts.json
 | `session_name` | Имя сессии (уникальное), например `account1` |
 | `api_id` | Получить на https://my.telegram.org |
 | `api_hash` | Получить на https://my.telegram.org |
-| `phone` | Номер телефона в формате +375291234567 |
+| `phone` | Международный номер с `+` и кодом страны (например +375…, +95…) |
 | `proxy` | Прокси для аккаунта (опционально): `socks5://user:pass@host:port` |
 
 ### Пример

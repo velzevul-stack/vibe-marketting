@@ -29,6 +29,17 @@ def _sessions_dir() -> Path:
     return telethon_session_dir_path()
 
 
+def _parse_api_id(raw: str) -> int | None:
+    """api_id из строки; убирает управляющие символы (^H) и прочее, оставляет цифры."""
+    digits = re.sub(r"\D", "", raw or "")
+    if not digits:
+        return None
+    try:
+        return int(digits)
+    except ValueError:
+        return None
+
+
 def _unique_session_stem_from_phone(phone: str) -> str:
     """
     Имя файла без расширения для .session (локально на диске, не @username в Telegram).
@@ -120,9 +131,8 @@ async def _bind_session_console(console) -> None:
 
     api_id_s = Prompt.ask("api_id (число с my.telegram.org)").strip()
     api_hash = Prompt.ask("api_hash").strip()
-    try:
-        api_id = int(api_id_s)
-    except ValueError:
+    api_id = _parse_api_id(api_id_s)
+    if api_id is None:
         console.print("[red]api_id должен быть числом[/]")
         return
     phone = Prompt.ask("Телефон (опционально)", default="").strip() or None
@@ -138,13 +148,14 @@ async def _new_login_console(console) -> None:
     from telethon.errors import SessionPasswordNeededError
 
     api_id_s = Prompt.ask("api_id").strip()
-    try:
-        api_id = int(api_id_s)
-    except ValueError:
+    api_id = _parse_api_id(api_id_s)
+    if api_id is None:
         console.print("[red]api_id должен быть числом[/]")
         return
     api_hash = Prompt.ask("api_hash").strip()
-    phone = Prompt.ask("Телефон в формате +375...").strip()
+    phone = Prompt.ask(
+        "Телефон в международном формате (+код страны, напр. +375…, +7…, +95…)"
+    ).strip()
     if not phone:
         console.print("[red]Нужен телефон[/]")
         return
@@ -214,7 +225,9 @@ async def login_client_for_one_off_scrape(console):
         return None
     api_id, api_hash = pair
 
-    phone = Prompt.ask("Телефон в формате +375…").strip()
+    phone = Prompt.ask(
+        "Телефон в международном формате (+код страны, напр. +375…, +7…, +95…)"
+    ).strip()
     if not phone:
         console.print("[red]Нужен телефон[/]")
         return None
@@ -293,9 +306,8 @@ def _ask_api_id_hash_or_defaults(console, settings: Settings) -> tuple[int, str]
         "[dim]Можно задать постоянно в settings.json → telethon_default_api "
         "(см. settings.json.example).[/]"
     )
-    try:
-        aid = int(Prompt.ask("api_id (my.telegram.org)").strip())
-    except ValueError:
+    aid = _parse_api_id(Prompt.ask("api_id (my.telegram.org)").strip())
+    if aid is None:
         console.print("[red]Некорректный api_id[/]")
         return None
     hsh = Prompt.ask("api_hash").strip()
