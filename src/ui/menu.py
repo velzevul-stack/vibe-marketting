@@ -34,6 +34,7 @@ from src.config import (
     upsert_telethon_account,
 )
 from src.account_zip_import import import_sessions_zip, print_zip_import_report
+from src.groups_txt_io import export_groups_to_txt, import_txt_to_found_groups, load_found_groups_list
 from src.db import get_db
 from src.search import search_groups
 from src.verify.scraper import normalize_scrape_target, scrape_group
@@ -1410,20 +1411,8 @@ async def _run_stats() -> None:
     Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
 
 
-def _run_view_groups() -> None:
-    """Просмотр найденных групп из found_groups.json."""
-    found_path = Path("output") / "found_groups.json"
-    if not found_path.exists():
-        console.print("[red]Нет found_groups.json. Сначала выполните поиск групп (п.1).[/]")
-        return
-    try:
-        groups = json.loads(found_path.read_text(encoding="utf-8"))
-    except Exception as e:
-        console.print(f"[red]Ошибка чтения: {escape(str(e))}[/]")
-        return
-    if not isinstance(groups, list) or not groups:
-        console.print("[yellow]Список групп пуст.[/]")
-        return
+def _view_groups_table_once(found_path: Path, groups: list[dict]) -> None:
+    """Однократный вывод таблицы групп."""
     limit = _prompt_nonneg_int("Сколько показать (0 = все)", default=30, allow_zero=True, minimum=0)
     if limit <= 0:
         limit = len(groups)
@@ -1442,7 +1431,7 @@ def _run_view_groups() -> None:
     console.print(table)
     console.print(f"[dim]Всего групп: {len(groups)}. Файл: {found_path}[/]")
     console.print(
-        "[dim]Очистить весь файл — [bold]главное меню → a[/] или подтвердите ниже.[/]"
+        "[dim]Очистить весь список — [bold]главное меню → a[/] или подтвердите ниже.[/]"
     )
     if Confirm.ask("Очистить found_groups.json (все записи)?", default=False):
         found_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1453,7 +1442,130 @@ def _run_view_groups() -> None:
             )
         found_path.write_text("[]\n", encoding="utf-8")
         console.print("[green]Список найденных групп очищен.[/]")
-    Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
+
+
+def _run_export_groups_txt(found_path: Path, groups: list[dict]) -> None:
+    """Экспорт ссылок в txt."""
+    default_out = Path("output") / "found_groups_export.txt"
+    raw = strip_c0_controls(
+        Prompt.ask("Путь к .txt для сохранения", default=str(default_out)).strip()
+    )
+    if not raw:
+        console.print("[dim]Отмена.[/]")
+        return
+    out_p = Path(raw).expanduser()
+    ok, msg, n = export_groups_to_txt(groups, out_p)
+    if ok:
+        console.print(f"[green]Экспортировано ссылок:[/] [bold]{n}[/] → [cyan]{escape(msg)}[/]")
+    else:
+        console.print(f"[red]{escape(msg)}[/]")
+
+
+def _run_import_groups_txt(found_path: Path) -> None:
+    """Импорт ссылок из txt в found_groups.json."""
+    console.print(
+        "[dim]Формат: как [bold]group_links.txt[/] — по одной ссылке [bold]t.me[/] / [bold]telegram.me[/] на строку; "
+        "строки с # в начале пропускаются.[/]"
+    )
+    raw = strip_c0_controls(Prompt.ask("Полный путь к .txt", default="").strip())
+    if not raw:
+        console.print("[dim]Отмена.[/]")
+        return
+    txt_p = Path(raw).expanduser()
+    if not txt_p.is_file():
+        console.print(f"[red]Файл не найден: {escape(str(txt_p))}[/]")
+        return
+    mode = Prompt.ask(
+        "Режим",
+        choices=["replace", "append"],
+        default="append",
+    )
+    if mode == "replace" and found_path.is_file():
+        if not Confirm.ask(
+            "Заменить весь found_groups.json содержимым из txt? (будет снимок копии, если список не пуст.)",
+            default=False,
+        ):
+            console.print("[dim]Отменено.[/]")
+            return
+        if _snapshot_found_groups_before_overwrite(found_path):
+            console.print(
+                f"[dim]Копия текущего JSON:[/] [cyan]{_FOUND_GROUPS_PREVIOUS}[/] "
+                f"и [cyan]{_FOUND_GROUPS_ARCHIVE_DIR}/[/]"
+            )
+    elif mode == "append" and found_path.is_file():
+        try:
+            body = found_path.read_text(encoding="utf-8").strip()
+            data = json.loads(body) if body else []
+            if isinstance(data, list) and len(data) > 0:
+                if not Confirm.ask(
+                    f"Добавить ссылки из txt к текущим {len(data)} группам (дубликаты по ссылке уберутся)?",
+                    default=True,
+                ):
+                    console.print("[dim]Отменено.[/]")
+                    return
+        except (OSError, json.JSONDecodeError):
+            if not Confirm.ask("found_groups.json повреждён или пуст — перезаписать из txt?", default=True):
+                return
+
+    with console.status("[bold]Импорт…[/]", spinner="dots"):
+        ok, msg, total = import_txt_to_found_groups(txt_p, found_path, mode=mode)
+    if ok:
+        console.print(
+            f"[green]Готово:[/] в [cyan]{escape(msg)}[/] сейчас [bold]{total}[/] групп "
+            f"([dim]режим: {mode}[/])"
+        )
+    else:
+        console.print(f"[red]{escape(msg)}[/]")
+
+
+def _run_view_groups() -> None:
+    """Просмотр / экспорт / импорт найденных групп (found_groups.json)."""
+    found_path = Path("output") / "found_groups.json"
+    while True:
+        console.print()
+        console.print("[bold white]── Найденные группы ──[/]")
+        exists = found_path.is_file()
+        groups: list[dict] = []
+        err_read: str | None = None
+        if exists:
+            loaded, err_read = load_found_groups_list(found_path)
+            if loaded is None:
+                console.print(f"[red]Ошибка чтения found_groups.json: {escape(err_read or '')}[/]")
+            else:
+                groups = loaded
+        n = len(groups)
+        console.print(
+            f"[dim]Файл:[/] [cyan]{found_path}[/] · "
+            f"[dim]записей:[/] {'[yellow]0[/]' if n == 0 else f'[green]{n}[/]'}"
+        )
+        console.print(f"{_mk('1')} Показать таблицу в консоли")
+        console.print(f"{_mk('2')} Экспорт в текстовый файл [dim](ссылки t.me, как group_links.txt)[/]")
+        console.print(f"{_mk('3')} Импорт из текстового файла [dim](replace или append)[/]")
+        console.print(f"{_mk('0')} Назад в главное меню")
+        console.print()
+        sub = Prompt.ask("Выбор", choices=["0", "1", "2", "3"], default="0")
+        if sub == "0":
+            break
+        if sub == "1":
+            if not exists:
+                console.print("[red]Файла нет. Сначала пункт [bold]1[/] главного меню (поиск) или импорт txt ([bold]3[/]).[/]")
+            elif not groups:
+                console.print("[yellow]Список групп пуст. Импортируйте txt ([bold]3[/]) или выполните поиск.[/]")
+            else:
+                _view_groups_table_once(found_path, groups)
+            Prompt.ask("\n[dim]Enter — продолжить[/]", default="")
+        elif sub == "2":
+            if not groups:
+                console.print("[yellow]Нечего экспортировать — список пуст.[/]")
+            else:
+                _run_export_groups_txt(found_path, groups)
+            Prompt.ask("\n[dim]Enter — продолжить[/]", default="")
+        elif sub == "3":
+            _run_import_groups_txt(found_path)
+            loaded, _ = load_found_groups_list(found_path)
+            if loaded is not None:
+                groups = loaded
+            Prompt.ask("\n[dim]Enter — продолжить[/]", default="")
 
 
 def _run_clear_found_groups() -> None:
