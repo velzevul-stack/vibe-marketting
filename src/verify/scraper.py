@@ -1,13 +1,77 @@
 """Скрапинг сообщений из групп через Telethon."""
 import asyncio
+import re
 
 from telethon import TelegramClient
-from telethon.errors import FloodWaitError
+from telethon.errors import (
+    ChannelInvalidError,
+    ChannelPrivateError,
+    FloodWaitError,
+    InviteHashExpiredError,
+    InviteHashInvalidError,
+    UsernameInvalidError,
+    UsernameNotOccupiedError,
+)
 
 from src.config import Settings
 from src.db import get_db
 from src.invite.manager import AccountPool
 from src.verify.parser import extract_sellers
+
+# Публичный @username Telegram: буква/цифра/_, обычно от 5 символов; допускаем 4 для старых ников.
+_USERNAME_SLUG = re.compile(r"^[A-Za-z0-9_]{4,}$")
+
+
+def normalize_scrape_target(link: str | None, id_fallback: str | None = None) -> str | None:
+    """
+    Привести ссылку из found_groups.json / txt к виду, понятному get_entity.
+    Если в ``link`` нет t.me, но ``id_fallback`` похож на username — собрать https://t.me/...
+    """
+    raw = (link or "").strip()
+    fb = (str(id_fallback or "").strip().lstrip("@"))
+    low = raw.lower()
+
+    if "joinchat/" in low:
+        return raw if raw.startswith("http") else f"https://{raw.lstrip('/')}"
+
+    if "t.me/+" in low or "telegram.me/+" in low:
+        s = raw.replace(" ", "")
+        return s if s.startswith("http") else f"https://{s.lstrip('/')}"
+
+    if re.search(r"t\.me/c/\d+", low):
+        return raw if raw.startswith("http") else f"https://{raw.lstrip('/')}"
+
+    if "t.me/" in low or "telegram.me/" in low:
+        return raw if raw.startswith("http") else f"https://{raw.lstrip('/')}"
+
+    if raw.startswith("@"):
+        u = raw[1:].strip()
+        if _USERNAME_SLUG.match(u):
+            return f"https://t.me/{u}"
+        return None
+
+    if raw and _USERNAME_SLUG.match(raw):
+        return f"https://t.me/{raw}"
+
+    if fb and _USERNAME_SLUG.match(fb):
+        return f"https://t.me/{fb}"
+
+    return raw if raw else None
+
+
+def _friendly_entity_error(exc: BaseException, ref: str) -> ValueError:
+    if isinstance(exc, ChannelPrivateError):
+        hint = (
+            "Чат закрытый — этот аккаунт не состоит в группе. Сначала главное меню → "
+            "п.3 «Вступить в группы», затем снова сбор."
+        )
+    else:
+        hint = (
+            "По ссылке нет такого публичного чата в Telegram: @username мог переименоваться, "
+            "канал удалён, или запись в found_groups.json / поиске устарела. "
+            "Проверьте ссылку в браузере; обновите п.1 «Поиск групп» или config/group_links.txt."
+        )
+    return ValueError(f"{hint} Ссылка: {ref!s} — {exc}")
 
 
 async def scrape_group(
@@ -17,11 +81,13 @@ async def scrape_group(
     settings: Settings | None = None,
     on_progress=None,
     client: TelegramClient | None = None,
+    id_fallback: str | None = None,
 ) -> tuple[int, int]:
     """
     Скрапить группу и сохранить найденных продавцов.
     Возвращает (hot_count, warm_count).
     Если передан ``client`` — используется он (без disconnect в конце); pool/state опциональны.
+    ``id_fallback`` — поле ``id`` из JSON, если ``link`` пустой или без t.me.
     """
     sett = settings or Settings()
     db = get_db()
@@ -29,6 +95,10 @@ async def scrape_group(
     state = None
     session_for_flood: str | None = None
     acc_pool: AccountPool | None
+
+    ref = normalize_scrape_target(group_link, id_fallback)
+    if not ref:
+        return 0, 0
 
     if client is None:
         acc_pool = pool or AccountPool()
@@ -58,7 +128,7 @@ async def scrape_group(
                 if not await client.is_user_authorized():
                     return 0, 0
 
-                entity = await client.get_entity(group_link)
+                entity = await client.get_entity(ref)
                 chat_id = str(getattr(entity, "id", "") or entity)
                 processed = 0
 
@@ -113,6 +183,20 @@ async def scrape_group(
                     acc_pool.mark_flood_wait(session_for_flood, e.seconds)
                 await asyncio.sleep(e.seconds)
                 continue
+            except (
+                UsernameNotOccupiedError,
+                UsernameInvalidError,
+                ChannelInvalidError,
+                ChannelPrivateError,
+                InviteHashInvalidError,
+                InviteHashExpiredError,
+            ) as e:
+                raise _friendly_entity_error(e, ref) from e
+            except ValueError as e:
+                es = str(e)
+                if "No user has" in es or "Cannot find any entity" in es or "Nobody is using" in es:
+                    raise _friendly_entity_error(e, ref) from e
+                raise
     finally:
         if own_client:
             try:

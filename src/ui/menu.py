@@ -30,7 +30,7 @@ from src.config import (
 )
 from src.db import get_db
 from src.search import search_groups
-from src.verify.scraper import scrape_group
+from src.verify.scraper import normalize_scrape_target, scrape_group
 from src.verify.proxy_checker import check_proxies
 from src.invite import InviteManager, AccountPool
 from src.telethon_session_menu import login_client_for_one_off_scrape, run_telethon_session_menu
@@ -546,22 +546,25 @@ async def _run_scrape(
     sem = asyncio.Semaphore(max_concurrent)
 
     async def _scrape_one(i: int, g: dict):
-        link = g.get("link") or g.get("id", "")
-        if not link or "t.me" not in str(link):
-            return 0, 0
         title = g.get("title", "?")
+        raw_link = str(g.get("link") or "").strip()
+        raw_id = g.get("id")
+        id_fb = str(raw_id).strip() if raw_id is not None and str(raw_id).strip() else None
+        if not normalize_scrape_target(raw_link, id_fb):
+            return 0, 0
         async with sem:
             try:
                 def on_progress(cur, tot):
                     pct = (cur / tot * 100) if tot else 0
                     console.print(f"  [dim]{escape(str(title))}: {cur}/{tot} ({pct:.1f}%)[/]", end="\r")
                 hot, warm = await scrape_group(
-                    link,
+                    raw_link,
                     limit=limit,
                     pool=pool,
                     settings=sett,
                     on_progress=on_progress,
                     client=fixed_client,
+                    id_fallback=id_fb,
                 )
                 console.print(f"  [green]{escape(str(title))}: {hot} горячих, {warm} тёплых[/]")
                 return hot, warm

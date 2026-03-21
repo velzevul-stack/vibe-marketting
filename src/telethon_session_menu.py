@@ -7,6 +7,7 @@ from rich.prompt import Prompt, Confirm
 from rich.table import Table
 
 from src.cli_input import digits_only, parse_api_id_digits, strip_c0_controls
+from src.scrape_ephemeral_login import load_scrape_ephemeral_login, save_scrape_ephemeral_login
 from src.config import (
     Settings,
     accounts_json_path,
@@ -206,7 +207,7 @@ async def _new_login_console(console) -> None:
 async def login_client_for_one_off_scrape(console):
     """
     Разовая авторизация для сбора базы (меню 2→1→отдельный).
-    Порядок: api → телефон → [прокси да/нет] → код → 2FA; имя .session подставляется само.
+    Можно продолжить прошлую сессию + api_id/api_hash из output/last_scrape_ephemeral_login.json.
 
     Возвращает (TelegramClient, meta) с уже подключённым клиентом; disconnect — у вызывающего.
     meta: session_name, api_id, api_hash, phone, proxy_url (str | None).
@@ -215,36 +216,7 @@ async def login_client_for_one_off_scrape(console):
     from telethon.errors import SessionPasswordNeededError
 
     settings = Settings()
-    pair = _ask_api_id_hash_or_defaults(console, settings)
-    if not pair:
-        return None
-    api_id, api_hash = pair
-
-    phone = strip_c0_controls(
-        Prompt.ask(
-            "Телефон в международном формате (+код страны, напр. +375…, +7…, +95…)"
-        ).strip()
-    )
-    if not phone:
-        console.print("[red]Нужен телефон[/]")
-        return None
-
-    proxy_url: str | None = None
-    if Confirm.ask("Использовать прокси для Telegram (этот сбор)?", default=False):
-        raw = strip_c0_controls(Prompt.ask("Прокси URL (socks5:// или http://)", default="").strip())
-        if raw and not is_placeholder_proxy_url(raw):
-            proxy_url = raw
-
-    session_name = _unique_session_stem_from_phone(phone)
-    console.print(
-        f"[dim]Вход по номеру и коду — как в приложении Telegram. "
-        f"Ключ сохранится в файл [cyan]{_session_dir_label()}/{session_name}.session[/] "
-        f"(это не логин и не @username, только чтобы не вводить код каждый раз).[/]"
-    )
-
-    proxy_tg = proxy_url_to_telethon(proxy_url)
     _sessions_dir().mkdir(parents=True, exist_ok=True)
-    session_base = str(_sessions_dir() / session_name)
 
     def code_cb() -> str:
         return digits_only(Prompt.ask("Код из Telegram (SMS или приложение)"))
@@ -260,10 +232,8 @@ async def login_client_for_one_off_scrape(console):
             return manual
         return effective_2fa_password(settings)
 
-    client = TelegramClient(session_base, api_id, api_hash, proxy=proxy_tg)
-    try:
-        await client.connect()
-        if not await client.is_user_authorized():
+    async def _finish_sign_in(client: TelegramClient, phone: str) -> bool:
+        try:
             sent = await client.send_code_request(phone)
             try:
                 await client.sign_in(
@@ -273,6 +243,134 @@ async def login_client_for_one_off_scrape(console):
                 )
             except SessionPasswordNeededError:
                 await client.sign_in(password=password_cb())
+            return True
+        except Exception as e:
+            console.print(f"[red]Ошибка входа: {e}[/]")
+            return False
+
+    last = load_scrape_ephemeral_login()
+    if last:
+        sn = last["session_name"]
+        sess_file = _sessions_dir() / f"{sn}.session"
+        if sess_file.is_file():
+            tail = str(last["api_id"])[-4:]
+            if Confirm.ask(
+                f"Использовать предыдущий отдельный вход? "
+                f"(сессия [cyan]{sn}[/], тот же api_id/api_hash; файл .session на месте, окончание api_id …{tail})",
+                default=True,
+            ):
+                api_id = int(last["api_id"])
+                api_hash = str(last["api_hash"])
+                proxy_raw = last.get("proxy_url")
+                proxy_url: str | None = (
+                    str(proxy_raw).strip()
+                    if proxy_raw and not is_placeholder_proxy_url(str(proxy_raw))
+                    else None
+                )
+                session_base = str(_sessions_dir() / sn)
+                proxy_tg = proxy_url_to_telethon(proxy_url)
+                client = TelegramClient(session_base, api_id, api_hash, proxy=proxy_tg)
+                try:
+                    await client.connect()
+                    phone = strip_c0_controls(str(last.get("phone") or "").strip())
+                    if await client.is_user_authorized():
+                        me = await client.get_me()
+                        console.print(
+                            f"[green]Уже авторизовано: {getattr(me, 'username', None) or me.id}[/]"
+                        )
+                        meta = {
+                            "session_name": sn,
+                            "api_id": api_id,
+                            "api_hash": api_hash,
+                            "phone": phone or None,
+                            "proxy_url": proxy_url,
+                        }
+                        save_scrape_ephemeral_login(
+                            session_name=sn,
+                            api_id=api_id,
+                            api_hash=api_hash,
+                            phone=phone or None,
+                            proxy_url=proxy_url,
+                        )
+                        return client, meta
+                    console.print(
+                        "[yellow]Сессия на диске есть, но вход не активен — нужен код из Telegram.[/]"
+                    )
+                    if not phone:
+                        phone = strip_c0_controls(
+                            Prompt.ask(
+                                "Телефон в международном формате (+код страны, напр. +375…, +7…, +95…)"
+                            ).strip()
+                        )
+                    if not phone:
+                        console.print("[red]Нужен телефон[/]")
+                        await client.disconnect()
+                        return None
+                    if not await _finish_sign_in(client, phone):
+                        await client.disconnect()
+                        return None
+                    me = await client.get_me()
+                    console.print(f"[green]Авторизовано: {getattr(me, 'username', None) or me.id}[/]")
+                    meta = {
+                        "session_name": sn,
+                        "api_id": api_id,
+                        "api_hash": api_hash,
+                        "phone": phone,
+                        "proxy_url": proxy_url,
+                    }
+                    save_scrape_ephemeral_login(
+                        session_name=sn,
+                        api_id=api_id,
+                        api_hash=api_hash,
+                        phone=phone,
+                        proxy_url=proxy_url,
+                    )
+                    return client, meta
+                except Exception as e:
+                    console.print(f"[red]Ошибка при использовании прошлой сессии: {e}[/]")
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
+                    return None
+
+    pair = _ask_api_id_hash_or_defaults(console, settings)
+    if not pair:
+        return None
+    api_id, api_hash = pair
+
+    phone = strip_c0_controls(
+        Prompt.ask(
+            "Телефон в международном формате (+код страны, напр. +375…, +7…, +95…)"
+        ).strip()
+    )
+    if not phone:
+        console.print("[red]Нужен телефон[/]")
+        return None
+
+    proxy_url = None
+    if Confirm.ask("Использовать прокси для Telegram (этот сбор)?", default=False):
+        raw = strip_c0_controls(Prompt.ask("Прокси URL (socks5:// или http://)", default="").strip())
+        if raw and not is_placeholder_proxy_url(raw):
+            proxy_url = raw
+
+    session_name = _unique_session_stem_from_phone(phone)
+    console.print(
+        f"[dim]Вход по номеру и коду — как в приложении Telegram. "
+        f"Ключ сохранится в файл [cyan]{_session_dir_label()}/{session_name}.session[/] "
+        f"(это не логин и не @username, только чтобы не вводить код каждый раз).[/]"
+    )
+
+    proxy_tg = proxy_url_to_telethon(proxy_url)
+    session_base = str(_sessions_dir() / session_name)
+
+    client = TelegramClient(session_base, api_id, api_hash, proxy=proxy_tg)
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            if not await _finish_sign_in(client, phone):
+                await client.disconnect()
+                return None
         me = await client.get_me()
         console.print(f"[green]Авторизовано: {getattr(me, 'username', None) or me.id}[/]")
     except Exception as e:
@@ -290,6 +388,13 @@ async def login_client_for_one_off_scrape(console):
         "phone": phone,
         "proxy_url": proxy_url,
     }
+    save_scrape_ephemeral_login(
+        session_name=session_name,
+        api_id=api_id,
+        api_hash=api_hash,
+        phone=phone,
+        proxy_url=proxy_url,
+    )
     return client, meta
 
 
