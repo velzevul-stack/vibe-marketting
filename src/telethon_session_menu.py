@@ -1,4 +1,6 @@
 """Консоль: сессии Telethon (.session) и accounts.json."""
+import re
+import secrets
 import shutil
 from pathlib import Path
 
@@ -25,6 +27,22 @@ def _session_dir_label() -> str:
 
 def _sessions_dir() -> Path:
     return telethon_session_dir_path()
+
+
+def _unique_session_stem_from_phone(phone: str) -> str:
+    """
+    Имя файла без расширения для .session (локально на диске, не @username в Telegram).
+    """
+    digits = re.sub(r"\D", "", phone or "")
+    tail = digits[-8:] if len(digits) >= 4 else (digits or "user")
+    base = f"tg_{tail}"
+    d = _sessions_dir()
+    stem = base
+    for _ in range(32):
+        if not (d / f"{stem}.session").is_file():
+            return stem
+        stem = f"{base}_{secrets.token_hex(2)}"
+    return f"tg_{secrets.token_hex(8)}"
 
 
 def _session_paths() -> list[Path]:
@@ -119,10 +137,6 @@ async def _new_login_console(console) -> None:
     from telethon import TelegramClient
     from telethon.errors import SessionPasswordNeededError
 
-    session_name = Prompt.ask("Имя сессии (будет sessions/ИМЯ.session)").strip()
-    if not session_name or "/" in session_name or "\\" in session_name:
-        console.print("[red]Некорректное имя[/]")
-        return
     api_id_s = Prompt.ask("api_id").strip()
     try:
         api_id = int(api_id_s)
@@ -134,6 +148,14 @@ async def _new_login_console(console) -> None:
     if not phone:
         console.print("[red]Нужен телефон[/]")
         return
+
+    auto_name = _unique_session_stem_from_phone(phone)
+    session_name = Prompt.ask(
+        f"Имя файла в {_session_dir_label()}/ (Enter = автоматически: {auto_name})",
+        default=auto_name,
+    ).strip()
+    if not session_name or "/" in session_name or "\\" in session_name:
+        session_name = auto_name
 
     _sessions_dir().mkdir(parents=True, exist_ok=True)
     session_base = str(_sessions_dir() / session_name)
@@ -178,18 +200,13 @@ async def _new_login_console(console) -> None:
 async def login_client_for_one_off_scrape(console):
     """
     Разовая авторизация для сбора базы (меню 2→1→отдельный).
-    Порядок: имя сессии → api → телефон → [прокси да/нет] → код → 2FA при необходимости.
+    Порядок: api → телефон → [прокси да/нет] → код → 2FA; имя .session подставляется само.
 
     Возвращает (TelegramClient, meta) с уже подключённым клиентом; disconnect — у вызывающего.
     meta: session_name, api_id, api_hash, phone, proxy_url (str | None).
     """
     from telethon import TelegramClient
     from telethon.errors import SessionPasswordNeededError
-
-    session_name = Prompt.ask("Имя сессии (будет sessions/ИМЯ.session)").strip()
-    if not session_name or "/" in session_name or "\\" in session_name:
-        console.print("[red]Некорректное имя сессии[/]")
-        return None
 
     settings = Settings()
     pair = _ask_api_id_hash_or_defaults(console, settings)
@@ -207,6 +224,13 @@ async def login_client_for_one_off_scrape(console):
         raw = Prompt.ask("Прокси URL (socks5:// или http://)", default="").strip()
         if raw and not is_placeholder_proxy_url(raw):
             proxy_url = raw
+
+    session_name = _unique_session_stem_from_phone(phone)
+    console.print(
+        f"[dim]Вход по номеру и коду — как в приложении Telegram. "
+        f"Ключ сохранится в файл [cyan]{_session_dir_label()}/{session_name}.session[/] "
+        f"(это не логин и не @username, только чтобы не вводить код каждый раз).[/]"
+    )
 
     proxy_tg = proxy_url_to_telethon(proxy_url)
     _sessions_dir().mkdir(parents=True, exist_ok=True)

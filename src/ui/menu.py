@@ -306,7 +306,7 @@ def _render_main_menu() -> str:
     console.print()
     console.print("[bold]Данные и поиск[/]")
     console.print(f"{_mi('1')} Поиск групп")
-    console.print(f"{_mi('2')} Сбор базы пользователей [dim](п.1 — один аккаунт / стандарт)[/]")
+    console.print(f"{_mi('2')} Сбор базы пользователей [dim](п.1 — новый вход в Telegram / стандарт)[/]")
     console.print(f"{_mi('7')} Просмотр найденных групп")
     console.print(f"{_mi('6')} Статистика базы")
     console.print(
