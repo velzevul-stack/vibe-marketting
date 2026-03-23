@@ -109,6 +109,8 @@ class Settings:
         self.delay_scrape_per_message: float = float(
             delays.get("scrape_per_message", 0.0)
         )
+        self.delay_broadcast_min: int = int(delays.get("broadcast_min", 45))
+        self.delay_broadcast_max: int = int(delays.get("broadcast_max", 120))
         self.telegram_index_api_key: str | None = self._data.get("telegram_index_api_key") or None
         self.ddgs_search_enabled: bool = self._data.get("ddgs_search_enabled", True)
         self.tg_catalog_enabled: bool = self._data.get("tg_catalog_enabled", True)
@@ -159,6 +161,23 @@ class Settings:
         self.default_telethon_api_hash: str | None = (
             str(_h).strip() if _h and str(_h).strip() else None
         )
+        _cd = self._data.get("campaign_dir")
+        self.campaign_dir: str = (
+            str(_cd).strip() if _cd and str(_cd).strip() else "campaign"
+        )
+        # Рассылка: лимит исходящих ЛС на аккаунт за календарный день UTC (см. account_broadcast_daily в БД)
+        self.broadcast_daily_limit_per_account: int = int(
+            self._data.get("broadcast_daily_limit_per_account", 25)
+        )
+        self.broadcast_homoglyph_enabled: bool = bool(
+            self._data.get("broadcast_homoglyph_enabled", True)
+        )
+        try:
+            self.broadcast_homoglyph_probability: float = float(
+                self._data.get("broadcast_homoglyph_probability", 0.12)
+            )
+        except (TypeError, ValueError):
+            self.broadcast_homoglyph_probability = 0.12
 
 
 def clone_settings(**overrides) -> Settings:
@@ -195,23 +214,39 @@ def telethon_session_file(session_name: str, settings: Settings | None = None) -
     return telethon_session_dir_path(settings) / f"{session_name}.session"
 
 
+def bundle_round_robin_account_rows(all_rows: list[dict]) -> list[dict]:
+    """
+    Записи с ``session_name`` (не шаблон) — для round-robin API и прокси,
+    в том числе до назначения api_id/api_hash.
+    """
+    out: list[dict] = []
+    for r in all_rows:
+        if not isinstance(r, dict) or r.get("_template"):
+            continue
+        if (r.get("session_name") or "").strip():
+            out.append(r)
+    return out
+
+
 def assign_proxies_round_robin_to_accounts(
     settings: Settings | None = None,
+    proxy_pool: list[str] | None = None,
 ) -> tuple[bool, str]:
     """
     Назначить прокси из пула аккаунтам (round-robin).
+    Если передан ``proxy_pool``, используется он; иначе пул из config (proxies.txt / settings).
     Сохраняет весь accounts.json (включая служебные строки), не только список аккаунтов.
     Дополнительно: если есть ``sessions/<имя>.json``, в него пишется то же поле ``proxy``.
     """
     s = settings or Settings()
-    proxies = load_proxy_pool_from_config()
+    proxies = proxy_pool if proxy_pool is not None else load_proxy_pool_from_config()
     if not proxies:
         return False, "Нет прокси в пуле (proxies.txt / settings.json)"
     all_rows = load_accounts_all()
-    tele = load_accounts()
-    if not tele:
-        return False, "Нет аккаунтов в accounts.json"
-    for i, acc in enumerate(tele):
+    targets = bundle_round_robin_account_rows(all_rows)
+    if not targets:
+        return False, "Нет аккаунтов (session_name) в accounts.json"
+    for i, acc in enumerate(targets):
         p = proxies[i % len(proxies)]
         acc["proxy"] = p
         name = acc.get("session_name")
@@ -474,6 +509,76 @@ def write_proxy_to_session_sidecar(
         pass
 
 
+def write_api_to_session_sidecar(
+    session_name: str,
+    api_id: int,
+    api_hash: str,
+    settings: Settings | None = None,
+) -> None:
+    """Обновить api_id/api_hash в ``<session_name>.json`` рядом с .session (если файл есть)."""
+    if not (session_name or "").strip():
+        return
+    s = settings or Settings()
+    path = telethon_session_dir_path(s) / f"{session_name.strip()}.json"
+    if not path.is_file():
+        return
+    try:
+        text = path.read_text(encoding="utf-8-sig").strip()
+        data: dict = json.loads(text) if text else {}
+        if not isinstance(data, dict):
+            return
+        data["api_id"] = int(api_id)
+        data["api_hash"] = str(api_hash).strip()
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        pass
+
+
+def remove_api_from_session_sidecar(
+    session_name: str,
+    settings: Settings | None = None,
+) -> bool:
+    """
+    Удалить ``api_id`` / ``api_hash`` из sidecar (и зеркальные ``app_id`` / ``app_hash``, если есть).
+    Возвращает True, если файл был изменён.
+    """
+    if not (session_name or "").strip():
+        return False
+    s = settings or Settings()
+    path = telethon_session_dir_path(s) / f"{session_name.strip()}.json"
+    if not path.is_file():
+        return False
+    try:
+        text = path.read_text(encoding="utf-8-sig").strip()
+        data: dict = json.loads(text) if text else {}
+        if not isinstance(data, dict):
+            return False
+        changed = False
+        for k in (
+            "api_id",
+            "api_hash",
+            "app_id",
+            "app_hash",
+            "apiId",
+            "apiHash",
+        ):
+            if k in data:
+                del data[k]
+                changed = True
+        for nest in ("telegram", "app", "telethon", "session", "credentials"):
+            sub = data.get(nest)
+            if isinstance(sub, dict):
+                for k in ("api_id", "api_hash", "app_id", "app_hash"):
+                    if k in sub:
+                        del sub[k]
+                        changed = True
+        if changed:
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return changed
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
 def _read_proxy_file(filepath: Path) -> list[str]:
     """Прочитать прокси из файла."""
     if not filepath.exists():
@@ -707,3 +812,176 @@ def load_session_bind_specs_from_file() -> list[dict]:
         if spec:
             out.append(spec)
     return out
+
+
+def load_proxy_pool_from_file(path: Path) -> list[str]:
+    """Прокси из произвольного txt (формат как config/proxies.txt)."""
+    return _read_proxy_file(Path(path))
+
+
+def parse_api_credentials_line(line: str) -> tuple[int, str] | None:
+    """Одна строка ``api_id:api_hash`` (hash может содержать двоеточия — берём split только первый ``:``)."""
+    line = (line or "").strip()
+    if not line or line.startswith("#"):
+        return None
+    if ":" not in line:
+        return None
+    left, right = line.split(":", 1)
+    ds = digits_only(left.strip())
+    if not ds:
+        return None
+    ahash = right.strip()
+    if not ahash:
+        return None
+    try:
+        return int(ds), ahash
+    except ValueError:
+        return None
+
+
+def load_api_pairs_from_file(path: Path) -> list[tuple[int, str]]:
+    """Список (api_id, api_hash) из txt (пакет campaign/apis.txt)."""
+    p = Path(path)
+    if not p.is_file():
+        return []
+    out: list[tuple[int, str]] = []
+    for raw in p.read_text(encoding="utf-8").splitlines():
+        pair = parse_api_credentials_line(raw)
+        if pair:
+            out.append(pair)
+    return out
+
+
+def assign_apis_round_robin_to_accounts(
+    api_pairs: list[tuple[int, str]],
+    settings: Settings | None = None,
+) -> tuple[bool, str]:
+    """
+    Назначить api_id/api_hash из списка парам аккаунтам (round-robin).
+    Обновляет accounts.json и при наличии sidecar ``sessions/<name>.json``.
+    """
+    if not api_pairs:
+        return False, "Пустой список api (apis.txt)"
+    s = settings or Settings()
+    all_rows = load_accounts_all()
+    targets = bundle_round_robin_account_rows(all_rows)
+    if not targets:
+        return False, "Нет аккаунтов (session_name) в accounts.json"
+    for i, acc in enumerate(targets):
+        aid, ahash = api_pairs[i % len(api_pairs)]
+        acc["api_id"] = int(aid)
+        acc["api_hash"] = str(ahash).strip()
+        name = acc.get("session_name")
+        if name:
+            write_api_to_session_sidecar(str(name), aid, ahash, s)
+    save_accounts_all(all_rows)
+    return True, str(accounts_json_path())
+
+
+def strip_api_credentials_from_accounts(
+    settings: Settings | None = None,
+) -> tuple[int, int, str]:
+    """
+    Убрать ключи приложения у всех аккаунтов с ``session_name`` в accounts.json
+    и в sidecar ``sessions/<name>.json`` (в т.ч. app_id/app_hash на верхнем уровне).
+
+    Удобно перед коммитом/push, чтобы не утекли api_id/api_hash. После клона назначьте API
+    из ``apis.txt`` (рассылка из пакета) или задайте ``telethon_default_api`` и синхронизацию.
+
+    Возвращает (число строк accounts.json, где сняты поля, число изменённых sidecar, путь к accounts.json).
+    """
+    s = settings or Settings()
+    all_rows = load_accounts_all()
+    n_acc = 0
+    n_side = 0
+    for row in all_rows:
+        if not isinstance(row, dict) or row.get("_template"):
+            continue
+        name = (row.get("session_name") or "").strip()
+        if not name:
+            continue
+        popped = False
+        for k in ("api_id", "api_hash"):
+            if k in row:
+                row.pop(k, None)
+                popped = True
+        if popped:
+            n_acc += 1
+        if remove_api_from_session_sidecar(name, s):
+            n_side += 1
+    save_accounts_all(all_rows)
+    return n_acc, n_side, str(accounts_json_path())
+
+
+def clear_telethon_default_api() -> tuple[bool, str]:
+    """Обнулить ``telethon_default_api`` в settings.json (остальные ключи сохраняются)."""
+    path = settings_json_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        try:
+            raw = path.read_text(encoding="utf-8-sig").strip()
+            data = json.loads(raw) if raw else {}
+        except (OSError, json.JSONDecodeError) as e:
+            return False, f"Не удалось прочитать settings.json: {e}"
+        if not isinstance(data, dict):
+            return False, "settings.json: корень должен быть объектом JSON"
+    else:
+        data = {}
+    data["telethon_default_api"] = {"api_id": None, "api_hash": ""}
+    try:
+        path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as e:
+        return False, f"Не удалось записать settings.json: {e}"
+    return True, str(path)
+
+
+def clear_accounts_json() -> None:
+    """Очистить config/accounts.json (пустой список)."""
+    save_accounts_all([])
+
+
+def wipe_telethon_session_files(settings: Settings | None = None) -> int:
+    """Удалить все ``*.session`` и одноимённые ``*.json`` sidecar в каталоге сессий."""
+    d = telethon_session_dir_path(settings)
+    n = 0
+    for p in list(d.glob("*.session")):
+        stem = p.stem
+        try:
+            p.unlink()
+            n += 1
+        except OSError:
+            pass
+        sidecar = d / f"{stem}.json"
+        if sidecar.is_file():
+            try:
+                sidecar.unlink()
+            except OSError:
+                pass
+    return n
+
+
+def clear_proxy_pool_in_config() -> tuple[bool, str]:
+    """Очистить config/proxies.txt и ``proxies.list`` в settings.json (если файл есть)."""
+    cfg_dir = _config_dir()
+    ptxt = cfg_dir / "proxies.txt"
+    try:
+        ptxt.write_text("", encoding="utf-8")
+    except OSError as e:
+        return False, f"proxies.txt: {e}"
+    path = settings_json_path()
+    if path.is_file():
+        try:
+            raw = path.read_text(encoding="utf-8-sig").strip()
+            data = json.loads(raw) if raw else {}
+            if isinstance(data, dict) and isinstance(data.get("proxies"), dict):
+                data["proxies"]["list"] = []
+                path.write_text(
+                    json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+        except (OSError, TypeError, json.JSONDecodeError):
+            pass
+    return True, str(ptxt)

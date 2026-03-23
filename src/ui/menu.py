@@ -20,20 +20,32 @@ from rich.prompt import Prompt, Confirm
 from src.config import (
     Settings,
     accounts_json_path,
+    assign_apis_round_robin_to_accounts,
     assign_proxies_round_robin_to_accounts,
+    bundle_round_robin_account_rows,
+    clear_accounts_json,
+    clear_proxy_pool_in_config,
+    clear_telethon_default_api,
     clone_settings,
     group_links_file_path,
     is_proxy_enabled,
     load_accounts,
+    load_accounts_all,
+    load_api_pairs_from_file,
     load_groups_from_links_txt,
     load_proxy_pool_from_config,
+    load_proxy_pool_from_file,
     mask_proxy_display,
     set_proxy_enabled,
     set_telethon_default_api,
+    strip_api_credentials_from_accounts,
     telethon_session_dir_path,
     upsert_telethon_account,
+    wipe_telethon_session_files,
 )
 from src.account_zip_import import import_sessions_zip, print_zip_import_report
+from src.broadcast.bundle import load_campaign_bundle, validate_campaign_bundle
+from src.broadcast.runner import run_dm_broadcast
 from src.groups_txt_io import export_groups_to_txt, import_txt_to_found_groups, load_found_groups_list
 from src.db import get_db
 from src.search import search_groups
@@ -48,6 +60,8 @@ from src.ui.progress_util import console_loading
 from telethon import TelegramClient
 
 console = Console()
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 _FOUND_GROUPS_PREVIOUS = Path("output") / "found_groups.previous.json"
 
@@ -357,7 +371,7 @@ def _render_main_menu() -> str:
     console.print()
     console.print("[bold white]── Система и сервис ──[/]")
     console.print(
-        f"{_mk('9')} Импорты, настройки и аккаунты [dim](ZIP, прокси, сессии, API)[/]"
+        f"{_mk('9')} Импорты, настройки и аккаунты [dim](ZIP, рассылка, очистка, сессии, API)[/]"
     )
     console.print(
         f"{_mk('a')} Очистить список найденных групп [dim](found_groups.json, не БД)[/]"
@@ -427,9 +441,12 @@ def _run_settings_submenu() -> None:
         console.print(f"{_mk('3')} Проверить прокси из пула")
         console.print(f"{_mk('4')} Задать telethon_default_api ([dim]api_id + api_hash для автопривязки сессий[/])")
         console.print(f"{_mk('5')} Синхронизировать папку сессий → accounts.json [dim](как при старте)[/]")
+        console.print(
+            f"{_mk('6')} Удалить ключи API [dim](api_id/api_hash из accounts.json + sidecar; перед git push)[/]"
+        )
         console.print(f"{_mk('0')} Назад")
         console.print()
-        sub = Prompt.ask("Выбор", choices=["0", "1", "2", "3", "4", "5"], default="0")
+        sub = Prompt.ask("Выбор", choices=["0", "1", "2", "3", "4", "5", "6"], default="0")
         if sub == "0":
             break
         try:
@@ -471,6 +488,25 @@ def _run_settings_submenu() -> None:
                     console.print(f"  [yellow]{escape(str(w))}[/]")
                 if len(warns) > 12:
                     console.print(f"  [dim]… ещё {len(warns) - 12}[/]")
+            elif sub == "6":
+                console.print(
+                    "[yellow]Снимаются api_id/api_hash[/] со всех записей с [cyan]session_name[/] "
+                    "в [cyan]accounts.json[/] и из [cyan]sessions/*.json[/] (прокси и .session не трогаются). "
+                    "Без ключей Telethon не запустится, пока не назначите API снова ([bold]9→6[/] из пакета или [bold]9→2→4[/])."
+                )
+                if not Confirm.ask("Продолжить?", default=False):
+                    continue
+                n_acc, n_side, path = strip_api_credentials_from_accounts(Settings())
+                console.print(
+                    f"[green]Готово:[/] записей в accounts.json без ключей: {n_acc}, "
+                    f"обновлено sidecar: {n_side} · [dim]{escape(path)}[/]"
+                )
+                if Confirm.ask(
+                    "Также обнулить telethon_default_api в settings.json?",
+                    default=False,
+                ):
+                    ok_d, msg_d = clear_telethon_default_api()
+                    console.print(f"[green]{escape(msg_d)}[/]" if ok_d else f"[red]{escape(msg_d)}[/]")
         except KeyboardInterrupt:
             console.print("\n[yellow]Прервано.[/]")
         except Exception as e:
@@ -506,6 +542,196 @@ def _run_mytelegram_api_placeholder() -> None:
     console.print("[dim]Реализация сценария будет добавлена позже.[/]")
 
 
+def _run_broadcast_from_bundle_menu() -> None:
+    """Рассылка ЛС из пакета: zip, proxies.txt, text_1/2.txt, 1–3.jpg."""
+    console.print()
+    console.print("[bold white]── Рассылка из пакета ──[/]")
+    console.print(
+        "[dim]В каталоге должны быть:[/] [cyan]accounts.zip[/], [cyan]apis.txt[/] [dim](api_id:api_hash по строке)[/], "
+        "[cyan]proxies.txt[/], [cyan]text_1.txt[/], [cyan]text_2.txt[/], [cyan]1.jpg … 3.jpg[/]"
+    )
+    sett = Settings()
+    default_dir = _PROJECT_ROOT / sett.campaign_dir
+    raw = strip_c0_controls(
+        Prompt.ask("Каталог пакета", default=str(default_dir)).strip()
+    )
+    root = Path(raw).expanduser()
+    bundle = load_campaign_bundle(root)
+    errs = validate_campaign_bundle(bundle)
+    if errs:
+        console.print("[red]Пакет не готов:[/]")
+        for e in errs:
+            console.print(f"  [red]{escape(e)}[/]")
+        Prompt.ask("\n[dim]Enter — назад[/]", default="")
+        return
+    console.print("[green]Пакет проверен.[/]")
+
+    if Confirm.ask("Импортировать accounts.zip в каталог сессий?", default=True):
+        mode = "overwrite" if Confirm.ask("Перезаписать совпадающие файлы на диске?", default=False) else "skip"
+        try:
+            rep = import_sessions_zip(bundle.zip_path, on_conflict=mode, settings=sett)
+            print_zip_import_report(console, rep)
+        except (OSError, zipfile.BadZipFile) as e:
+            console.print(f"[red]Ошибка ZIP: {escape(str(e))}[/]")
+            Prompt.ask("\n[dim]Enter — назад[/]", default="")
+            return
+
+    api_pairs = load_api_pairs_from_file(bundle.apis_file)
+    if not api_pairs:
+        console.print("[red]В apis.txt пакета нет валидных пар api_id:api_hash.[/]")
+        Prompt.ask("\n[dim]Enter — назад[/]", default="")
+        return
+
+    if Confirm.ask("Назначить API из apis.txt на аккаунты (round-robin)?", default=True):
+        ok_api, msg_api = assign_apis_round_robin_to_accounts(api_pairs, sett)
+        if ok_api:
+            console.print(f"[green]API назначены:[/] [dim]{escape(msg_api)}[/]")
+        else:
+            console.print(f"[red]{escape(msg_api)}[/]")
+            Prompt.ask("\n[dim]Enter — назад[/]", default="")
+            return
+
+    proxy_lines = load_proxy_pool_from_file(bundle.proxies_file)
+    if not proxy_lines:
+        console.print("[red]В proxies.txt пакета нет валидных строк прокси.[/]")
+        Prompt.ask("\n[dim]Enter — назад[/]", default="")
+        return
+
+    if Confirm.ask("Назначить прокси из пакета на аккаунты (round-robin)?", default=True):
+        ok, msg = assign_proxies_round_robin_to_accounts(sett, proxy_pool=proxy_lines)
+        if ok:
+            console.print(f"[green]Прокси назначены:[/] [dim]{escape(msg)}[/]")
+        else:
+            console.print(f"[red]{escape(msg)}[/]")
+            Prompt.ask("\n[dim]Enter — назад[/]", default="")
+            return
+
+    if not load_accounts():
+        console.print("[red]Нет аккаунтов в accounts.json после импорта.[/]")
+        Prompt.ask("\n[dim]Enter — назад[/]", default="")
+        return
+
+    cat = Prompt.ask("Категория базы", choices=["hot", "warm", "all"], default="hot")
+    cat_val = None if cat == "all" else cat
+    limit = _prompt_nonneg_int(
+        "Сколько пользователей из БД (макс. в выборке)",
+        default=200,
+        minimum=1,
+        maximum=100_000,
+    )
+    ex_inv = Confirm.ask(
+        "Исключить строк с invited_to_channel_at [dim](как в других пунктах)[/]?",
+        default=True,
+    )
+
+    console.print()
+    console.print(
+        f"{_mk('1')} Обычная рассылка [dim](без отмеченных privacy-очередью)[/]"
+    )
+    console.print(
+        f"{_mk('2')} Повтор [dim](только очередь после UserPrivacyRestricted; см. п.6 базы / п.4 контакты)[/]"
+    )
+    bmode = Prompt.ask("Режим рассылки", choices=["1", "2"], default="1")
+    broadcast_mode = "privacy_retry" if bmode == "2" else "normal"
+
+    console.print(
+        "[yellow]Массовая рассылка незнакомцам нарушает правила Telegram, может привести к бану аккаунтов "
+        "и юридическим претензиям. Используйте только с согласия получателей.[/]"
+    )
+    if not Confirm.ask("Начать рассылку?", default=False):
+        return
+
+    async def _go():
+        db = get_db()
+        return await run_dm_broadcast(
+            bundle=bundle,
+            db=db,
+            settings=sett,
+            console=console,
+            category=cat_val,
+            total_limit=limit,
+            exclude_invited=ex_inv,
+            broadcast_mode=broadcast_mode,
+        )
+
+    try:
+        totals = asyncio.run(_go())
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Прервано.[/]")
+        Prompt.ask("\n[dim]Enter — назад[/]", default="")
+        return
+
+    console.print()
+    console.print(
+        f"[bold green]Итого:[/] отправлено [white]{totals.sent}[/], "
+        f"ошибок [red]{totals.failed}[/], пропусков [yellow]{totals.skipped}[/], "
+        f"privacy [magenta]{totals.privacy_skipped}[/], лимит/день [cyan]{totals.deferred_daily_cap}[/]"
+    )
+    for sn, row in sorted(totals.by_session.items(), key=lambda x: x[0]):
+        s, f, sk, pr, dc = row
+        if s or f or sk or pr or dc:
+            console.print(
+                f"  [dim]{escape(str(sn))}:[/] ok={s} fail={f} skip={sk} privacy={pr} daily_cap={dc}"
+            )
+    Prompt.ask("\n[dim]Enter — назад[/]", default="")
+
+
+def _run_cleanup_accounts_menu() -> None:
+    """Очистка accounts.json, сессий на диске, пула прокси."""
+    console.print()
+    console.print("[bold white]── Очистка аккаунтов и прокси ──[/]")
+    sess_dir = telethon_session_dir_path(Settings())
+    console.print(f"{_mk('1')} Очистить только [bold]accounts.json[/] [dim](пустой список)[/]")
+    console.print(
+        f"{_mk('2')} [bold]accounts.json[/] + удалить [bold]*.session[/] и sidecar [bold]*.json[/] в "
+        f"[dim]{escape(str(sess_dir))}[/]"
+    )
+    console.print(f"{_mk('3')} Очистить [bold]config/proxies.txt[/] и [bold]proxies.list[/] в settings.json")
+    console.print(f"{_mk('4')} Полный сброс [dim](всё выше без дополнительных вопросов)[/]")
+    console.print(f"{_mk('0')} Отмена")
+    sub = Prompt.ask("Выбор", choices=["0", "1", "2", "3", "4"], default="0")
+    if sub == "0":
+        return
+
+    if sub == "4":
+        if not Confirm.ask(
+            "Полный сброс: accounts.json, все сессии в каталоге, прокси. Продолжить?",
+            default=False,
+        ):
+            return
+        clear_accounts_json()
+        console.print("[green]accounts.json очищен.[/]")
+        n = wipe_telethon_session_files(Settings())
+        console.print(f"[green]Удалено *.session:[/] {n}")
+        ok, msg = clear_proxy_pool_in_config()
+        console.print(f"[green]Прокси очищены:[/] [dim]{escape(msg)}[/]" if ok else f"[red]{escape(msg)}[/]")
+        Prompt.ask("\n[dim]Enter — назад[/]", default="")
+        return
+
+    if sub == "1":
+        if not Confirm.ask("Обнулить accounts.json?", default=False):
+            return
+        clear_accounts_json()
+        console.print("[green]accounts.json очищен.[/]")
+    elif sub == "2":
+        if not Confirm.ask("Обнулить accounts.json?", default=False):
+            return
+        clear_accounts_json()
+        console.print("[green]accounts.json очищен.[/]")
+        if not Confirm.ask(f"Удалить все *.session в {sess_dir}?", default=False):
+            Prompt.ask("\n[dim]Enter — назад[/]", default="")
+            return
+        n = wipe_telethon_session_files(Settings())
+        console.print(f"[green]Удалено *.session:[/] {n}")
+    elif sub == "3":
+        if not Confirm.ask("Очистить proxies.txt и proxies.list в settings?", default=False):
+            return
+        ok, msg = clear_proxy_pool_in_config()
+        console.print(f"[green]Прокси очищены:[/] [dim]{escape(msg)}[/]" if ok else f"[red]{escape(msg)}[/]")
+
+    Prompt.ask("\n[dim]Enter — назад[/]", default="")
+
+
 def _run_system_hub_submenu() -> None:
     """Хаб: импорт, настройки, сессии, опционально API."""
     while True:
@@ -516,11 +742,13 @@ def _run_system_hub_submenu() -> None:
         console.print(f"{_mk('3')} Сессии Telethon [dim](список, привязка, вход, автопривязка)[/]")
         console.print(f"{_mk('4')} API my.telegram.org [dim](опционально)[/]")
         console.print(f"{_mk('5')} Подготовка аккаунтов [dim](2FA, прокси, сброс сессий)[/]")
+        console.print(f"{_mk('6')} Рассылка из пакета [dim](ZIP, прокси, тексты, картинки, БД)[/]")
+        console.print(f"{_mk('7')} Очистка аккаунтов и прокси [dim](быстрый сброс)[/]")
         console.print(f"{_mk('0')} Назад в главное меню")
         console.print()
         sub = Prompt.ask(
             "Выбор",
-            choices=["0", "1", "2", "3", "4", "5"],
+            choices=["0", "1", "2", "3", "4", "5", "6", "7"],
             default="0",
         )
         if sub == "0":
@@ -536,6 +764,10 @@ def _run_system_hub_submenu() -> None:
                 _run_mytelegram_api_placeholder()
             elif sub == "5":
                 asyncio.run(run_bulk_account_prepare(console))
+            elif sub == "6":
+                _run_broadcast_from_bundle_menu()
+            elif sub == "7":
+                _run_cleanup_accounts_menu()
         except KeyboardInterrupt:
             console.print("\n[yellow]Прервано.[/]")
         except Exception as e:
@@ -1027,13 +1259,29 @@ async def _add_contacts_workflow(
     console.print(
         f"{_mk('2')} [bold]Всех[/] в категории [dim](и помеченных, и нет — повтор AddContact в Telegram обычно безвреден)[/]"
     )
-    scope = Prompt.ask("Выбор", choices=["1", "2"], default="1")
-    exclude_added = scope == "1"
-    users = await db.get_users(
-        category=cat if cat != "all" else None,
-        limit=50,
-        exclude_added_to_contacts=exclude_added,
+    console.print(
+        f"{_mk('3')} [bold]Очередь privacy[/] [dim](рассылка не дошла из-за приватности — для контактов и повтора)[/]"
     )
+    scope = Prompt.ask("Выбор", choices=["1", "2", "3"], default="1")
+    exclude_added = scope == "1"
+    cat_f = cat if cat != "all" else None
+    if scope == "3":
+        users = await db.get_users(
+            category=cat_f,
+            limit=50,
+            exclude_invited=True,
+            exclude_added_to_contacts=False,
+            exclude_broadcast=True,
+            exclude_privacy_blocked=False,
+            only_privacy_retry=True,
+        )
+    else:
+        users = await db.get_users(
+            category=cat_f,
+            limit=50,
+            exclude_added_to_contacts=exclude_added,
+            exclude_broadcast=False,
+        )
     if not users:
         console.print("[yellow]Нет пользователей для добавления.[/]")
         return
@@ -1285,17 +1533,17 @@ async def _run_check_proxies() -> None:
 
 def _run_assign_proxies() -> None:
     """Назначить прокси из пула аккаунтам (перестроить под TG-аккаунты)."""
-    accounts = load_accounts()
+    bundle_rows = bundle_round_robin_account_rows(load_accounts_all())
     proxies = load_proxy_pool_from_config()
-    if not accounts:
-        console.print("[red]Нет аккаунтов в config/accounts.json[/]")
+    if not bundle_rows:
+        console.print("[red]Нет строк с session_name в config/accounts.json[/]")
         return
     if not proxies:
         console.print("[red]Нет прокси. Добавьте в config/proxies.txt или settings.json[/]")
         return
     console.print(
-        f"[dim]В пуле прокси: {len(proxies)} шт. Учитываются только аккаунты из accounts.json: {len(accounts)} шт. "
-        f"(файлы .session без записи в JSON сюда не входят.)[/]"
+        f"[dim]В пуле прокси: {len(proxies)} шт. Строк в accounts.json с session_name: {len(bundle_rows)} шт. "
+        f"(round-robin по порядку в JSON; .session без записи в JSON сюда не входят.)[/]"
     )
     if not Confirm.ask(
         "Назначить каждому аккаунту один прокси по round-robin (1-й акк → 1-й прокси, 2-й → 2-й, …)?"
@@ -1320,12 +1568,19 @@ async def _run_browse_users_db() -> None:
     with console_loading(console, "Загрузка…"):
         await db.init()
     cat = Prompt.ask("Категория", choices=["all", "hot", "warm"], default="all")
+    list_mode = Prompt.ask(
+        "Кого показывать",
+        choices=["all", "privacy_queue"],
+        default="all",
+    )
     needle = strip_c0_controls(
         Prompt.ask("Подстрока username [dim](пусто = все; без @)[/]", default="").strip()
     )
     needle_arg = needle if needle else None
 
     async def _refresh_total() -> int:
+        if list_mode == "privacy_queue":
+            return await db.count_privacy_queue(username_contains=needle_arg, category=cat)
         return await db.count_users_search(username_contains=needle_arg, category=cat)
 
     total = await _refresh_total()
@@ -1337,31 +1592,45 @@ async def _run_browse_users_db() -> None:
     offset = 0
     page_size = 20
     while True:
-        rows = await db.list_users_search_page(
-            username_contains=needle_arg,
-            category=cat,
-            offset=offset,
-            limit=page_size,
-        )
+        if list_mode == "privacy_queue":
+            rows = await db.list_privacy_queue_page(
+                username_contains=needle_arg,
+                category=cat,
+                offset=offset,
+                limit=page_size,
+            )
+        else:
+            rows = await db.list_users_search_page(
+                username_contains=needle_arg,
+                category=cat,
+                offset=offset,
+                limit=page_size,
+            )
         if not rows:
             console.print("[dim]Конец списка по текущему фильтру.[/]")
             break
         end = min(offset + len(rows), total)
-        table = Table(title=f"users [dim]{offset + 1}–{end} из {total}[/]")
+        title_suffix = "privacy-очередь" if list_mode == "privacy_queue" else "users"
+        table = Table(title=f"{title_suffix} [dim]{offset + 1}–{end} из {total}[/]")
         table.add_column("id", style="dim", width=7)
         table.add_column("username", style="cyan", max_width=28)
         table.add_column("telegram_id", style="dim", max_width=14)
         table.add_column("cat", width=6)
         table.add_column("first_seen", style="dim", max_width=20)
+        if list_mode == "privacy_queue":
+            table.add_column("privacy_at", style="yellow", max_width=20)
         for r in rows:
             fs = (r.get("first_seen_at") or "")[:19]
-            table.add_row(
+            cells = [
                 str(r.get("id")),
                 str(r.get("username") or "—"),
                 str(r.get("telegram_id") or "—"),
                 str(r.get("category") or "—"),
                 fs,
-            )
+            ]
+            if list_mode == "privacy_queue":
+                cells.append((r.get("broadcast_privacy_blocked_at") or "")[:19])
+            table.add_row(*cells)
         console.print(table)
         console.print(
             "[dim]Enter — следующие 20 · введите новую подстроку username — новый поиск · q — выход[/]"
@@ -1393,6 +1662,7 @@ async def _run_stats() -> None:
     with console_loading(console, "Статистика…"):
         await db.init()
         hot, warm = await db.count_users()
+        privacy_queue_n = await db.count_privacy_queue()
 
     # Найденные группы
     found_groups_path = Path("output") / "found_groups.json"
@@ -1419,6 +1689,9 @@ async def _run_stats() -> None:
     table.add_row("  Горячие", str(hot))
     table.add_row("  Тёплые", str(warm))
     table.add_row("  Всего", str(hot + warm))
+    table.add_row("", "")
+    table.add_row("[bold]Рассылка[/]", "")
+    table.add_row("  Очередь privacy (не доставлено)", str(privacy_queue_n))
     console.print(table)
     Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
 
