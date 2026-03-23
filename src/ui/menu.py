@@ -547,8 +547,9 @@ def _run_broadcast_from_bundle_menu() -> None:
     console.print()
     console.print("[bold white]── Рассылка из пакета ──[/]")
     console.print(
-        "[dim]В каталоге должны быть:[/] [cyan]accounts.zip[/], [cyan]apis.txt[/] [dim](api_id:api_hash по строке)[/], "
-        "[cyan]proxies.txt[/], [cyan]text_1.txt[/], [cyan]text_2.txt[/], [cyan]1.jpg … 3.jpg[/]"
+        "[dim]В одном каталоге-пакете:[/] [cyan]accounts.zip[/], [cyan]apis.txt[/] [dim](api_id:api_hash)[/], "
+        "[cyan]proxies.txt[/] [dim](рядом с apis: строки[/] [cyan]host:port:user:pass[/] [dim]→ http автоматически; или URL)[/], "
+        "[cyan]text_1.txt[/], [cyan]text_2.txt[/], [cyan]1.jpg … 3.jpg[/]"
     )
     sett = Settings()
     default_dir = _PROJECT_ROOT / sett.campaign_dir

@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from src.config import load_proxy_pool_from_file
+
 
 @dataclass(frozen=True)
 class CampaignBundle:
@@ -61,7 +63,14 @@ def validate_campaign_bundle(b: CampaignBundle) -> list[str]:
         if n < 1:
             errs.append("apis.txt: нет ни одной валидной пары api_id:api_hash")
     if not b.proxies_file.is_file():
-        errs.append(f"Нет {b.proxies_file.name}")
+        errs.append(f"Нет {b.proxies_file.name} (рядом с {b.apis_file.name} в {b.root})")
+    else:
+        pool = load_proxy_pool_from_file(b.proxies_file)
+        if not pool:
+            errs.append(
+                f"{b.proxies_file.name}: нет ни одной валидной строки "
+                f"(формат host:port:user:pass → http, или готовый URL socks5/http)"
+            )
     for label, p in (
         ("text_1.txt", b.text_1),
         ("text_2.txt", b.text_2),

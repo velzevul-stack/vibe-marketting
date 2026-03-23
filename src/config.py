@@ -395,7 +395,7 @@ def normalize_proxy_line(line: str) -> str:
 
     Поддержка:
     - Уже URL: ``http://...``, ``socks5://...`` — без изменений
-    - ``host:port:user:pass`` — как в proxies.txt у многих провайдеров
+    - ``host:port:user:pass`` (часто в proxies.txt провайдеров) → ``http://user:pass@host:port``
     - ``host:port`` — без авторизации → ``http://host:port``
     """
     line = (line or "").strip()
@@ -404,12 +404,29 @@ def normalize_proxy_line(line: str) -> str:
     if "://" in line:
         return line
     parts = line.split(":", 3)
-    if len(parts) == 4 and parts[1].isdigit():
-        host, port, user, password = parts
-        u, p = quote(user, safe=""), quote(password, safe="")
-        return f"http://{u}:{p}@{host}:{port}"
-    if len(parts) == 2 and parts[1].isdigit():
-        return f"http://{parts[0]}:{parts[1]}"
+    if len(parts) == 4:
+        host, port_s, user, password = (p.strip() for p in parts)
+        if not host or not port_s.isdigit():
+            return ""
+        try:
+            port_i = int(port_s)
+        except ValueError:
+            return ""
+        if not (1 <= port_i <= 65535):
+            return ""
+        u, pw = quote(user, safe=""), quote(password, safe="")
+        return f"http://{u}:{pw}@{host}:{port_i}"
+    if len(parts) == 2:
+        host, port_s = parts[0].strip(), parts[1].strip()
+        if not host or not port_s.isdigit():
+            return line
+        try:
+            port_i = int(port_s)
+        except ValueError:
+            return line
+        if not (1 <= port_i <= 65535):
+            return line
+        return f"http://{host}:{port_i}"
     return line
 
 
