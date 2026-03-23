@@ -21,7 +21,10 @@ from telethon.errors import (
     InputUserDeactivatedError,
     PeerIdInvalidError,
     RPCError,
+    UserIdInvalidError,
     UserIsBlockedError,
+    UsernameInvalidError,
+    UsernameNotOccupiedError,
     UserPrivacyRestrictedError,
 )
 
@@ -38,11 +41,26 @@ def _err_tag(exc: BaseException) -> str:
     return type(exc).__name__
 
 
+def _err_detail(exc: BaseException, limit: int = 120) -> str:
+    s = (str(exc) or "").strip() or repr(exc)
+    return escape(s[:limit])
+
+
 async def _resolve_peer(client: TelegramClient, u: dict):
-    tid = u.get("telegram_id")
+    """
+    Сначала по числовому telegram_id; при любой ошибке резолва — fallback на username
+    (часто в БД лежит битый/чужой id, а @username валиден).
+    """
     un = (u.get("username") or "").strip().lstrip("@")
-    if tid is not None and str(tid).strip().isdigit():
-        return await client.get_entity(int(str(tid).strip()))
+    tid_s = str(u.get("telegram_id") or "").strip()
+
+    if tid_s.isdigit():
+        try:
+            return await client.get_entity(int(tid_s))
+        except Exception:
+            if un:
+                return await client.get_entity(un)
+            raise
     if un:
         return await client.get_entity(un)
     return None
@@ -247,7 +265,7 @@ async def run_dm_broadcast(
                     except Exception as e2:
                         await _log(
                             f"  [red]FAIL[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
-                            f"{escape(_err_tag(e2))}"
+                            f"{escape(_err_tag(e2))}: {_err_detail(e2)}"
                         )
                         await _add_totals(session_name, failed=1)
                 except UserPrivacyRestrictedError:
@@ -262,22 +280,31 @@ async def run_dm_broadcast(
                     UserIsBlockedError,
                     PeerIdInvalidError,
                     InputUserDeactivatedError,
+                    UsernameNotOccupiedError,
+                    UsernameInvalidError,
+                    UserIdInvalidError,
                 ) as e:
                     await _log(
                         f"  [yellow]skip[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
-                        f"{escape(_err_tag(e))}"
+                        f"{escape(_err_tag(e))}: {_err_detail(e)}"
+                    )
+                    await _add_totals(session_name, skipped=1)
+                except ValueError as e:
+                    await _log(
+                        f"  [yellow]skip[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
+                        f"ValueError: {_err_detail(e)}"
                     )
                     await _add_totals(session_name, skipped=1)
                 except RPCError as e:
                     await _log(
                         f"  [red]FAIL[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
-                        f"{escape(_err_tag(e))}"
+                        f"{escape(_err_tag(e))}: {_err_detail(e)}"
                     )
                     await _add_totals(session_name, failed=1)
                 except Exception as e:
                     await _log(
                         f"  [red]FAIL[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
-                        f"{escape(_err_tag(e))}"
+                        f"{escape(_err_tag(e))}: {_err_detail(e)}"
                     )
                     await _add_totals(session_name, failed=1)
 
