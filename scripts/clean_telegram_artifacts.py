@@ -1,18 +1,35 @@
 #!/usr/bin/env python3
 """
-Очистка секретов и лишних файлов сессий Telethon.
+Очистка секретов и лишних файлов сессий Telethon (без трогания пакета рассылки).
 
-  — снимает api_id/api_hash и proxy с записей в config/accounts.json;
-  — чистит все *.json в папке сессий (рекурсивно по вложенным dict);
-  — опционально: пул прокси в конфиге, telethon_default_api;
-  — опционально: удалить .session/.json, которых нет в accounts.json;
-  — опционально: выкинуть из accounts.json строки без файла .session на диске.
+Что трогается
+  • config/accounts.json — снятие api_id/api_hash и proxy (по session_name).
+  • Каталог telethon_session_dir (по умолчанию sessions/) — sidecar *.json, удаление сирот.
+  • Опционально: config/proxies.txt, proxies.list и telethon_default_api в settings.json.
 
-Запуск из корня репозитория:
+Что НЕ трогается
+  • Каталог campaign/ (accounts.zip, apis.txt, proxies.txt пакета, text_*.txt, *.jpg) —
+    скрипт к нему не обращается. Если в settings ошибочно указать telethon_session_dir
+    внутри campaign/, скрипт завершится с ошибкой.
 
-  python scripts/clean_telegram_artifacts.py --dry-run
+Как пользоваться (из корня репозитория)
+  # только посмотреть сирот / строки без .session
+  python scripts/clean_telegram_artifacts.py --dry-run --yes \\
+      --delete-orphans --drop-missing-session-rows
+
+  # полный сброс: секреты, пул прокси, default API, обрезка accounts.json, удаление сирот
+  python scripts/clean_telegram_artifacts.py --yes --full-account-reset
+
+  # только снять ключи с JSON, файлы сессий не удалять
   python scripts/clean_telegram_artifacts.py --yes
-  python scripts/clean_telegram_artifacts.py --yes --delete-orphans --drop-missing-session-rows
+
+FAQ
+  • Новые аккаунты не удалятся, если session_name есть в accounts.json и есть .session.
+  • Если accounts.json пустой и включено удаление сирот — все *.session/*.json в папке
+    сессий будут удалены; campaign/ при этом не затрагивается.
+  • Перед git push обычно: --yes (или --full-account-reset), затем коммит без секретов.
+
+Исходные флаги см. python scripts/clean_telegram_artifacts.py --help
 """
 from __future__ import annotations
 
@@ -25,8 +42,34 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+def _session_dir_collides_with_campaign(session_dir: Path, campaign_root: Path) -> tuple[bool, str]:
+    """
+    True + сообщение, если telethon_session_dir совпадает с campaign или лежит внутри него.
+    """
+    try:
+        sd = session_dir.resolve()
+        cr = campaign_root.resolve()
+    except OSError as e:
+        return True, f"Не удалось разрешить путь: {e}"
+    if sd == cr:
+        return (
+            True,
+            "telethon_session_dir совпадает с campaign_dir — укажите отдельную папку для .session.",
+        )
+    try:
+        sd.relative_to(cr)
+        return (
+            True,
+            "telethon_session_dir находится внутри campaign_dir — очистка затронула бы пакет рассылки.",
+        )
+    except ValueError:
+        pass
+    return False, ""
+
+
 def main() -> int:
     from rich.console import Console
+    from rich.markup import escape
 
     from src.config import (
         Settings,
@@ -41,7 +84,10 @@ def main() -> int:
     )
 
     parser = argparse.ArgumentParser(
-        description="Очистка API/прокси в accounts.json и sessions/*.json; опционально удаление «сирот».",
+        description=(
+            "Очистка API/прокси в accounts.json и telethon_session_dir/*.json; "
+            "опционально удаление сирот. Каталог campaign (пакет рассылки) не изменяется."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -52,6 +98,15 @@ def main() -> int:
         "--yes",
         action="store_true",
         help="Не спрашивать подтверждение перед деструктивными шагами",
+    )
+    parser.add_argument(
+        "--full-account-reset",
+        action="store_true",
+        help=(
+            "Пресет: снять API/прокси, sanitize *.json в папке сессий, очистить пул прокси и "
+            "telethon_default_api, drop-missing-session-rows, delete-orphans. "
+            "Не трогает campaign/ (zip, apis.txt пакета, картинки)."
+        ),
     )
     parser.add_argument(
         "--no-strip-api",
@@ -89,9 +144,24 @@ def main() -> int:
         help="Удалить из accounts.json строки, для которых нет <name>.session",
     )
     args = parser.parse_args()
+
+    if args.full_account_reset:
+        args.clear_proxy_pool = True
+        args.clear_default_api = True
+        args.drop_missing_session_rows = True
+        args.delete_orphans = True
+
     con = Console()
     sett = Settings()
     session_dir = telethon_session_dir_path(sett)
+    campaign_root = ROOT / sett.campaign_dir
+
+    unsafe, reason = _session_dir_collides_with_campaign(session_dir, campaign_root)
+    if unsafe:
+        con.print(f"[red]{escape(reason)}[/]")
+        con.print(f"[dim]telethon_session_dir:[/] {escape(str(session_dir.resolve()))}")
+        con.print(f"[dim]campaign_dir:[/] {escape(str(campaign_root.resolve()))}")
+        return 1
 
     destructive = bool(
         args.delete_orphans
@@ -108,6 +178,8 @@ def main() -> int:
 
     if args.dry_run:
         con.print("[yellow]Режим --dry-run:[/] пропуск записи в accounts.json, sidecar и settings.")
+    if args.full_account_reset:
+        con.print("[cyan]Пресет --full-account-reset[/] (campaign/ не изменяется).")
 
     if not args.dry_run and not args.no_strip_api:
         n_a, n_s, path = strip_api_credentials_from_accounts(sett)
@@ -121,7 +193,7 @@ def main() -> int:
         ch, err_n, errs = sanitize_all_session_sidecar_json_files(sett)
         con.print(f"[green]Проход по всем *.json в[/] [cyan]{session_dir}[/]: изменено={ch}, ошибок={err_n}")
         for e in errs[:20]:
-            con.print(f"  [yellow]{e}[/]")
+            con.print(f"  [yellow]{escape(e)}[/]")
         if len(errs) > 20:
             con.print(f"  [dim]… ещё {len(errs) - 20}[/]")
     elif args.dry_run and not args.no_sanitize_json:
@@ -132,14 +204,14 @@ def main() -> int:
             con.print("[dim](dry-run) пропуск --clear-proxy-pool[/]")
         else:
             ok, msg = clear_proxy_pool_in_config()
-            con.print(f"[green]Пул прокси:[/] {msg}" if ok else f"[red]{msg}[/]")
+            con.print(f"[green]Пул прокси:[/] {msg}" if ok else f"[red]{escape(msg)}[/]")
 
     if args.clear_default_api:
         if args.dry_run:
             con.print("[dim](dry-run) пропуск --clear-default-api[/]")
         else:
             ok, msg = clear_telethon_default_api()
-            con.print(f"[green]telethon_default_api:[/] {msg}" if ok else f"[red]{msg}[/]")
+            con.print(f"[green]telethon_default_api:[/] {msg}" if ok else f"[red]{escape(msg)}[/]")
 
     if args.drop_missing_session_rows:
         n, names = remove_account_rows_without_session_file(sett, dry_run=args.dry_run)
@@ -147,22 +219,22 @@ def main() -> int:
             f"[{'yellow' if args.dry_run else 'green'}]Строк accounts.json без .session на диске:[/] {n}"
         )
         for nm in names[:30]:
-            con.print(f"  [dim]{nm}[/]")
+            con.print(f"  [dim]{escape(nm)}[/]")
         if len(names) > 30:
             con.print(f"  [dim]… ещё {len(names) - 30}[/]")
 
     if args.delete_orphans:
         deleted, warns = delete_orphan_session_artifacts(sett, dry_run=args.dry_run)
         tag = "Будут удалены / удалено" if args.dry_run else "Удалено"
-        con.print(f"[green]{tag} файлов:[/] {len(deleted)}")
+        con.print(f"[green]{tag} файлов (сироты в папке сессий):[/] {len(deleted)}")
         for line in deleted[:40]:
-            con.print(f"  [dim]{line}[/]")
+            con.print(f"  [dim]{escape(line)}[/]")
         if len(deleted) > 40:
             con.print(f"  [dim]… ещё {len(deleted) - 40}[/]")
         for w in warns:
-            con.print(f"  [yellow]{w}[/]")
+            con.print(f"  [yellow]{escape(str(w))}[/]")
 
-    con.print("[dim]Готово.[/]")
+    con.print("[dim]Готово. Каталог campaign/ не изменялся.[/]")
     return 0
 
 
