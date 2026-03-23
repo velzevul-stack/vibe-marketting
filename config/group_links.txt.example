@@ -1,0 +1,6 @@
+# Скопируйте в group_links.txt (или имя из settings.json → group_links_file).
+# По одной ссылке на строку. Комментарии — строки с # в начале.
+# Примеры:
+# https://t.me/username
+# t.me/joinchat/XXXXXXXX
+# https://t.me/+inviteHash

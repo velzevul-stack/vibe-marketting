@@ -1,5 +1,7 @@
 sessions/
 accounts/
+accouts/
+campaign/
 output/*.db
 output/*.json
 config/accounts.json

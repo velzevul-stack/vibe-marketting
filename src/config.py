@@ -579,6 +579,236 @@ def remove_api_from_session_sidecar(
         return False
 
 
+def remove_proxy_from_session_sidecar(
+    session_name: str,
+    settings: Settings | None = None,
+) -> bool:
+    """Удалить поле ``proxy`` из sidecar (верхний уровень и типичные вложенные блоки)."""
+    if not (session_name or "").strip():
+        return False
+    s = settings or Settings()
+    path = telethon_session_dir_path(s) / f"{session_name.strip()}.json"
+    if not path.is_file():
+        return False
+    try:
+        text = path.read_text(encoding="utf-8-sig").strip()
+        data: dict = json.loads(text) if text else {}
+        if not isinstance(data, dict):
+            return False
+        changed = False
+        if "proxy" in data:
+            del data["proxy"]
+            changed = True
+        for nest in ("telegram", "app", "telethon", "session", "credentials"):
+            sub = data.get(nest)
+            if isinstance(sub, dict) and "proxy" in sub:
+                del sub["proxy"]
+                changed = True
+        if changed:
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return changed
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
+_SIDECAR_SECRET_KEYS = frozenset(
+    {
+        "api_id",
+        "api_hash",
+        "app_id",
+        "app_hash",
+        "apiId",
+        "apiHash",
+        "proxy",
+    }
+)
+
+
+def _deep_strip_sidecar_secrets(obj: object) -> bool:
+    """Рекурсивно удалить из dict/list известные ключи секретов. Возвращает True, если что-то убрано."""
+    changed = False
+    if isinstance(obj, dict):
+        for k in list(obj.keys()):
+            if k in _SIDECAR_SECRET_KEYS:
+                del obj[k]
+                changed = True
+            elif _deep_strip_sidecar_secrets(obj[k]):
+                changed = True
+    elif isinstance(obj, list):
+        for item in obj:
+            if _deep_strip_sidecar_secrets(item):
+                changed = True
+    return changed
+
+
+def sanitize_session_sidecar_json_file(path: Path) -> tuple[bool, str | None]:
+    """
+    Прочитать один ``*.json`` в каталоге сессий, убрать api/proxy на всех уровнях вложенности.
+    Возвращает (изменён ли файл, текст ошибки или None).
+    """
+    p = Path(path)
+    if not p.is_file():
+        return False, "не файл"
+    try:
+        raw = p.read_text(encoding="utf-8-sig").strip()
+    except OSError as e:
+        return False, str(e)
+    if not raw:
+        return False, None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        return False, e.msg
+    if not isinstance(data, dict):
+        return False, "ожидался объект JSON"
+    if not _deep_strip_sidecar_secrets(data):
+        return False, None
+    try:
+        p.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except OSError as e:
+        return False, str(e)
+    return True, None
+
+
+def sanitize_all_session_sidecar_json_files(
+    settings: Settings | None = None,
+) -> tuple[int, int, list[str]]:
+    """
+    Обойти все ``*.json`` в каталоге сессий Telethon и убрать api/proxy рекурсивно.
+
+    Возвращает (число изменённых файлов, число файлов с ошибкой, список сообщений).
+    """
+    s = settings or Settings()
+    d = telethon_session_dir_path(s)
+    if not d.is_dir():
+        return 0, 0, []
+    changed_n = 0
+    err_n = 0
+    errs: list[str] = []
+    for path in sorted(d.glob("*.json")):
+        ok, err = sanitize_session_sidecar_json_file(path)
+        if err:
+            err_n += 1
+            errs.append(f"{path.name}: {err}")
+        elif ok:
+            changed_n += 1
+    return changed_n, err_n, errs
+
+
+def strip_proxy_from_accounts(
+    settings: Settings | None = None,
+) -> tuple[int, int, str]:
+    """
+    Убрать поле ``proxy`` у записей с ``session_name`` в accounts.json и в соответствующих sidecar.
+
+    Возвращает (число строк accounts.json, где снят proxy, число изменённых sidecar, путь к accounts.json).
+    """
+    s = settings or Settings()
+    all_rows = load_accounts_all()
+    n_acc = 0
+    n_side = 0
+    for row in all_rows:
+        if not isinstance(row, dict) or row.get("_template"):
+            continue
+        name = (row.get("session_name") or "").strip()
+        if not name:
+            continue
+        if "proxy" in row:
+            row.pop("proxy", None)
+            n_acc += 1
+        if remove_proxy_from_session_sidecar(name, s):
+            n_side += 1
+    save_accounts_all(all_rows)
+    return n_acc, n_side, str(accounts_json_path())
+
+
+def allowed_session_names_from_accounts() -> set[str]:
+    """Имена сессий из accounts.json (не шаблон), для сопоставления с файлами на диске."""
+    return {
+        (r.get("session_name") or "").strip()
+        for r in bundle_round_robin_account_rows(load_accounts_all())
+        if (r.get("session_name") or "").strip()
+    }
+
+
+def delete_orphan_session_artifacts(
+    settings: Settings | None = None,
+    *,
+    dry_run: bool = False,
+) -> tuple[list[str], list[str]]:
+    """
+    Удалить ``*.session`` и одноимённые ``*.json``, если ``stem`` нет среди ``session_name`` в accounts.json.
+
+    ``dry_run=True`` — только список путей, которые были бы удалены.
+
+    Возвращает (список путей обработанных файлов, предупреждения).
+    """
+    s = settings or Settings()
+    d = telethon_session_dir_path(s)
+    warns: list[str] = []
+    if not d.is_dir():
+        return [], [f"Каталог сессий не найден: {d}"]
+    allowed = allowed_session_names_from_accounts()
+    deleted: list[str] = []
+    stems: set[str] = set()
+    for p in d.glob("*.session"):
+        stems.add(p.stem)
+    for p in d.glob("*.json"):
+        stems.add(p.stem)
+    for stem in sorted(stems):
+        if stem in allowed:
+            continue
+        for suffix in (".session", ".json"):
+            fp = d / f"{stem}{suffix}"
+            if not fp.is_file():
+                continue
+            rel = str(fp.relative_to(d))
+            if dry_run:
+                deleted.append(f"(dry-run) {rel}")
+                continue
+            try:
+                fp.unlink()
+                deleted.append(rel)
+            except OSError as e:
+                warns.append(f"{rel}: {e}")
+    return deleted, warns
+
+
+def remove_account_rows_without_session_file(
+    settings: Settings | None = None,
+    *,
+    dry_run: bool = False,
+) -> tuple[int, list[str]]:
+    """
+    Удалить из accounts.json строки с ``session_name``, для которых нет файла ``<name>.session``.
+
+    Возвращает (число удалённых строк, имена сессий).
+    """
+    s = settings or Settings()
+    session_dir = telethon_session_dir_path(s)
+    all_rows = load_accounts_all()
+    removed_names: list[str] = []
+    kept: list[dict] = []
+    for row in all_rows:
+        if not isinstance(row, dict):
+            kept.append(row)
+            continue
+        name = (row.get("session_name") or "").strip()
+        if (
+            name
+            and not row.get("_template")
+            and not (session_dir / f"{name}.session").is_file()
+        ):
+            removed_names.append(name)
+            continue
+        kept.append(row)
+    if dry_run:
+        return len(removed_names), removed_names
+    if removed_names:
+        save_accounts_all(kept)
+    return len(removed_names), removed_names
+
+
 def _read_proxy_file(filepath: Path) -> list[str]:
     """Прочитать прокси из файла."""
     if not filepath.exists():

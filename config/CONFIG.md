@@ -101,7 +101,20 @@ cp config/settings.json.example config/settings.json
 - `join_min/max` — между вступлениями в группы
 - `contact_min/max` — между добавлением в контакты
 - `invite_min/max` — между приглашениями в канал
+- `broadcast_min/max` — между исходящими ЛС в рассылке (меню **9 → 6**), на каждый аккаунт-воркер
 - `search_min/max` — между запросами поиска (умное ожидание, снижает риск бана)
+
+Каталог пакета рассылки по умолчанию: ключ `campaign_dir` (например `campaign/`):
+
+- `accounts.zip` — пары `.json` + `.session`
+- `apis.txt` — по одной строке `api_id:api_hash` на приложение; round-robin по аккаунтам при запуске рассылки из пакета
+- `proxies.txt`, `text_1.txt`, `text_2.txt`, `1.jpg`…`3.jpg`
+
+Рассылка (меню **9 → 6**):
+
+- `broadcast_daily_limit_per_account` — лимит **успешных** отправок на аккаунт за **календарные сутки UTC** (таблица `account_broadcast_daily` в SQLite). `0` — без лимита.
+- Обычный режим / «повтор privacy»: пользователи с `UserPrivacyRestrictedError` попадают в очередь (`broadcast_privacy_blocked_at`), просмотр в п. **6** базы и п. **4** контакты; повторная рассылка — режим 2 в п. **9 → 6**.
+- `broadcast_homoglyph_enabled` / `broadcast_homoglyph_probability` — случайная подмена кириллических е, а, о на латиницу в тексте подписи.
 
 ---
 

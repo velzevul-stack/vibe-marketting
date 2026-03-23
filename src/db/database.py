@@ -1,6 +1,6 @@
 """SQLite база данных."""
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import aiosqlite
@@ -39,12 +39,44 @@ class Database:
                     first_seen_at TEXT,
                     added_to_contacts_at TEXT,
                     invited_to_channel_at TEXT,
+                    broadcast_at TEXT,
+                    broadcast_privacy_blocked_at TEXT,
                     metadata TEXT,
                     UNIQUE(telegram_id, username)
                 )
             """)
             await db.execute("CREATE INDEX IF NOT EXISTS idx_users_category ON users(category)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS account_broadcast_daily (
+                    session_name TEXT NOT NULL,
+                    day_utc TEXT NOT NULL,
+                    sent INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (session_name, day_utc)
+                )
+                """
+            )
+            await db.commit()
+            await self._migrate_users_broadcast_at(db)
+            await self._migrate_users_broadcast_privacy(db)
+
+    async def _migrate_users_broadcast_at(self, db) -> None:
+        """Добавить колонку broadcast_at в существующих БД."""
+        cur = await db.execute("PRAGMA table_info(users)")
+        rows = await cur.fetchall()
+        cols = {r[1] for r in rows}
+        if "broadcast_at" not in cols:
+            await db.execute("ALTER TABLE users ADD COLUMN broadcast_at TEXT")
+            await db.commit()
+
+    async def _migrate_users_broadcast_privacy(self, db) -> None:
+        """Добавить колонку broadcast_privacy_blocked_at."""
+        cur = await db.execute("PRAGMA table_info(users)")
+        rows = await cur.fetchall()
+        cols = {r[1] for r in rows}
+        if "broadcast_privacy_blocked_at" not in cols:
+            await db.execute("ALTER TABLE users ADD COLUMN broadcast_privacy_blocked_at TEXT")
             await db.commit()
 
     async def add_chat(self, telegram_id: str, title: str, link: str, members_count: int = 0, source: str = "manual") -> None:
@@ -101,8 +133,16 @@ class Database:
         limit: int = 1000,
         exclude_invited: bool = True,
         exclude_added_to_contacts: bool = False,
+        exclude_broadcast: bool = False,
+        exclude_privacy_blocked: bool = True,
+        only_privacy_retry: bool = False,
     ) -> list[dict]:
-        """Получить пользователей."""
+        """
+        Получить пользователей.
+        exclude_broadcast — без успешной рассылки (broadcast_at).
+        exclude_privacy_blocked — для обычной рассылки: без очереди privacy (уже отмеченных).
+        only_privacy_retry — только очередь повтора (privacy без успешного broadcast_at).
+        """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             conds = ["1=1"]
@@ -111,6 +151,16 @@ class Database:
                 conds.append("(invited_to_channel_at IS NULL OR invited_to_channel_at = '')")
             if exclude_added_to_contacts:
                 conds.append("(added_to_contacts_at IS NULL OR added_to_contacts_at = '')")
+            if exclude_broadcast:
+                conds.append("(broadcast_at IS NULL OR broadcast_at = '')")
+            if only_privacy_retry:
+                conds.append(
+                    "(broadcast_privacy_blocked_at IS NOT NULL AND broadcast_privacy_blocked_at != '')"
+                )
+            elif exclude_privacy_blocked:
+                conds.append(
+                    "(broadcast_privacy_blocked_at IS NULL OR broadcast_privacy_blocked_at = '')"
+                )
             if category:
                 conds.append("category = ?")
                 params.append(category)
@@ -135,6 +185,104 @@ class Database:
             await db.execute(
                 "UPDATE users SET invited_to_channel_at = ? WHERE id = ?",
                 (datetime.now().isoformat(), user_id),
+            )
+            await db.commit()
+
+    async def mark_broadcast_sent(self, user_id: int) -> None:
+        """Отметить успешную рассылку ЛС; снять отметку privacy-очереди."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """UPDATE users SET broadcast_at = ?, broadcast_privacy_blocked_at = NULL
+                   WHERE id = ?""",
+                (datetime.now().isoformat(), user_id),
+            )
+            await db.commit()
+
+    async def mark_broadcast_privacy_blocked(self, user_id: int) -> None:
+        """Отметить UserPrivacyRestricted (без broadcast_at — для повторного прогона)."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE users SET broadcast_privacy_blocked_at = ? WHERE id = ?",
+                (datetime.now().isoformat(), user_id),
+            )
+            await db.commit()
+
+    async def count_privacy_queue(
+        self,
+        username_contains: str | None = None,
+        category: str | None = None,
+    ) -> int:
+        """Строки в очереди privacy: блок приватности, рассылка ещё не успешна."""
+        async with aiosqlite.connect(self.db_path) as db:
+            conds = [
+                "(broadcast_privacy_blocked_at IS NOT NULL AND broadcast_privacy_blocked_at != '')",
+                "(broadcast_at IS NULL OR broadcast_at = '')",
+            ]
+            params: list = []
+            if username_contains and str(username_contains).strip():
+                term = f"%{str(username_contains).strip().lstrip('@').lower()}%"
+                conds.append("LOWER(COALESCE(username, '')) LIKE ?")
+                params.append(term)
+            if category and str(category).strip() and category != "all":
+                conds.append("category = ?")
+                params.append(category)
+            sql = f"SELECT COUNT(*) FROM users WHERE {' AND '.join(conds)}"
+            cursor = await db.execute(sql, tuple(params))
+            row = await cursor.fetchone()
+            return int(row[0]) if row else 0
+
+    async def list_privacy_queue_page(
+        self,
+        username_contains: str | None = None,
+        category: str | None = None,
+        offset: int = 0,
+        limit: int = 20,
+    ) -> list[dict]:
+        """Страница очереди privacy для просмотра."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            conds = [
+                "(broadcast_privacy_blocked_at IS NOT NULL AND broadcast_privacy_blocked_at != '')",
+                "(broadcast_at IS NULL OR broadcast_at = '')",
+            ]
+            params: list = []
+            if username_contains and str(username_contains).strip():
+                term = f"%{str(username_contains).strip().lstrip('@').lower()}%"
+                conds.append("LOWER(COALESCE(username, '')) LIKE ?")
+                params.append(term)
+            if category and str(category).strip() and category != "all":
+                conds.append("category = ?")
+                params.append(category)
+            params.extend([limit, max(0, offset)])
+            sql = (
+                f"SELECT id, telegram_id, username, category, first_seen_at, broadcast_privacy_blocked_at, metadata "
+                f"FROM users WHERE {' AND '.join(conds)} ORDER BY id LIMIT ? OFFSET ?"
+            )
+            cursor = await db.execute(sql, tuple(params))
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
+    async def get_broadcast_sent_today_utc(self, session_name: str) -> int:
+        """Число успешных рассылок с аккаунта за текущие сутки UTC."""
+        day = datetime.now(timezone.utc).date().isoformat()
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute(
+                "SELECT sent FROM account_broadcast_daily WHERE session_name = ? AND day_utc = ?",
+                (session_name, day),
+            )
+            row = await cur.fetchone()
+            return int(row[0]) if row else 0
+
+    async def increment_broadcast_sent_today_utc(self, session_name: str) -> None:
+        """+1 к счётчику успешных отправок за сегодня UTC."""
+        day = datetime.now(timezone.utc).date().isoformat()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO account_broadcast_daily (session_name, day_utc, sent) VALUES (?, ?, 1)
+                ON CONFLICT(session_name, day_utc) DO UPDATE SET sent = sent + 1
+                """,
+                (session_name, day),
             )
             await db.commit()
 
