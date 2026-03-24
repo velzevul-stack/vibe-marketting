@@ -1,5 +1,6 @@
 """SQLite база данных."""
 import json
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -13,9 +14,18 @@ class Database:
         self.db_path = Path(db_path or Path(__file__).parent.parent.parent / "output" / "vibe_marketing.db")
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
+    @asynccontextmanager
+    async def _connect(self):
+        """Подключение с ожиданием при блокировке (много параллельных воркеров рассылки)."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA busy_timeout=20000")
+            yield db
+
     async def init(self) -> None:
         """Создать таблицы."""
         async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL")
+            await db.execute("PRAGMA busy_timeout=20000")
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS chats (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,7 +91,7 @@ class Database:
 
     async def add_chat(self, telegram_id: str, title: str, link: str, members_count: int = 0, source: str = "manual") -> None:
         """Добавить чат."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             await db.execute(
                 """INSERT OR IGNORE INTO chats (telegram_id, title, link, members_count, source, joined_at, last_scanned_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
@@ -103,7 +113,7 @@ class Database:
         if not key:
             return False
         meta_str = json.dumps(metadata or {}, ensure_ascii=False)
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             try:
                 await db.execute(
                     """INSERT INTO users (telegram_id, username, category, source_chat_id, source_message_id, first_seen_at, metadata)
@@ -117,7 +127,7 @@ class Database:
 
     async def user_exists(self, telegram_id: str | None, username: str | None) -> bool:
         """Проверить наличие пользователя."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             if telegram_id:
                 cursor = await db.execute("SELECT 1 FROM users WHERE telegram_id = ?", (telegram_id,))
             elif username:
@@ -143,7 +153,7 @@ class Database:
         exclude_privacy_blocked — для обычной рассылки: без очереди privacy (уже отмеченных).
         only_privacy_retry — только очередь повтора (privacy без успешного broadcast_at).
         """
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             conds = ["1=1"]
             params = []
@@ -172,7 +182,7 @@ class Database:
 
     async def mark_added_to_contacts(self, user_id: int) -> None:
         """Отметить добавление в контакты."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             await db.execute(
                 "UPDATE users SET added_to_contacts_at = ? WHERE id = ?",
                 (datetime.now().isoformat(), user_id),
@@ -181,7 +191,7 @@ class Database:
 
     async def mark_invited(self, user_id: int) -> None:
         """Отметить приглашение в канал."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             await db.execute(
                 "UPDATE users SET invited_to_channel_at = ? WHERE id = ?",
                 (datetime.now().isoformat(), user_id),
@@ -190,7 +200,7 @@ class Database:
 
     async def mark_broadcast_sent(self, user_id: int) -> None:
         """Отметить успешную рассылку ЛС; снять отметку privacy-очереди."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             await db.execute(
                 """UPDATE users SET broadcast_at = ?, broadcast_privacy_blocked_at = NULL
                    WHERE id = ?""",
@@ -200,7 +210,7 @@ class Database:
 
     async def mark_broadcast_privacy_blocked(self, user_id: int) -> None:
         """Отметить UserPrivacyRestricted (без broadcast_at — для повторного прогона)."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             await db.execute(
                 "UPDATE users SET broadcast_privacy_blocked_at = ? WHERE id = ?",
                 (datetime.now().isoformat(), user_id),
@@ -213,7 +223,7 @@ class Database:
         category: str | None = None,
     ) -> int:
         """Строки в очереди privacy: блок приватности, рассылка ещё не успешна."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             conds = [
                 "(broadcast_privacy_blocked_at IS NOT NULL AND broadcast_privacy_blocked_at != '')",
                 "(broadcast_at IS NULL OR broadcast_at = '')",
@@ -239,7 +249,7 @@ class Database:
         limit: int = 20,
     ) -> list[dict]:
         """Страница очереди privacy для просмотра."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             conds = [
                 "(broadcast_privacy_blocked_at IS NOT NULL AND broadcast_privacy_blocked_at != '')",
@@ -265,7 +275,7 @@ class Database:
     async def get_broadcast_sent_today_utc(self, session_name: str) -> int:
         """Число успешных рассылок с аккаунта за текущие сутки UTC."""
         day = datetime.now(timezone.utc).date().isoformat()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             cur = await db.execute(
                 "SELECT sent FROM account_broadcast_daily WHERE session_name = ? AND day_utc = ?",
                 (session_name, day),
@@ -276,7 +286,7 @@ class Database:
     async def increment_broadcast_sent_today_utc(self, session_name: str) -> None:
         """+1 к счётчику успешных отправок за сегодня UTC."""
         day = datetime.now(timezone.utc).date().isoformat()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             await db.execute(
                 """
                 INSERT INTO account_broadcast_daily (session_name, day_utc, sent) VALUES (?, ?, 1)
@@ -306,7 +316,7 @@ class Database:
 
     async def count_users(self, category: str | None = None) -> tuple[int, int]:
         """Подсчёт: (hot_count, warm_count)."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             cursor = await db.execute(
                 "SELECT category, COUNT(*) FROM users GROUP BY category",
             )
@@ -320,7 +330,7 @@ class Database:
         category: str | None = None,
     ) -> int:
         """Число строк users с опциональным фильтром по подстроке username (без @, регистронезависимо)."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             conds = ["1=1"]
             params: list = []
             if username_contains and str(username_contains).strip():
@@ -343,7 +353,7 @@ class Database:
         limit: int = 20,
     ) -> list[dict]:
         """Страница users для просмотра/поиска."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             conds = ["1=1"]
             params: list = []

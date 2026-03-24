@@ -33,7 +33,7 @@ from telethon.errors import (
 from src.broadcast.bundle import CampaignBundle, read_campaign_texts
 from src.broadcast.media_precache import precache_campaign_images
 from src.broadcast.text_jitter import apply_caption_homoglyph
-from src.config import Settings, load_accounts, is_proxy_enabled
+from src.config import Settings, load_accounts, is_proxy_enabled, telethon_session_file
 from src.db.database import Database
 from src.invite.manager import AccountPool, smart_delay
 
@@ -148,6 +148,14 @@ async def run_dm_broadcast(
         console.print("[red]Нет session_name в accounts.json.[/]")
         return BroadcastTotals()
 
+    _names_before = len(session_names)
+    session_names = list(dict.fromkeys(session_names))
+    if len(session_names) != _names_before:
+        console.print(
+            "[yellow]В accounts.json были повторы session_name — оставлены уникальные "
+            "(один файл .session нельзя открывать двумя воркерами сразу).[/]"
+        )
+
     daily_limit = int(settings.broadcast_daily_limit_per_account)
     if daily_limit < 0:
         daily_limit = 0
@@ -173,6 +181,13 @@ async def run_dm_broadcast(
     retired: set[str] = set()
     peer_floods: dict[str, int] = {}
     total_tasks = len(users)
+    session_connect_locks: dict[str, asyncio.Lock] = {}
+
+    def _session_connect_lock(session_name: str) -> asyncio.Lock:
+        key = str(telethon_session_file(session_name, settings).resolve())
+        if key not in session_connect_locks:
+            session_connect_locks[key] = asyncio.Lock()
+        return session_connect_locks[key]
 
     async def _log(msg: str) -> None:
         async with log_lock:
@@ -303,7 +318,9 @@ async def run_dm_broadcast(
                 await work_q.put(item)
                 await asyncio.sleep(random.uniform(0.02, 0.08))
 
-    async def _worker(session_name: str, progress: Progress, task_id: int) -> None:
+    async def _worker(
+        session_name: str, progress: Progress, task_id: int, worker_index: int = 0
+    ) -> None:
         client = pool.get_client(session_name, settings=settings)
         if not client:
             await _log(f"[red]{escape(session_name)}[/]: нет клиента (api_id/api_hash)")
@@ -314,7 +331,9 @@ async def run_dm_broadcast(
 
         try:
             try:
-                await client.connect()
+                await asyncio.sleep(worker_index * 0.1 + random.uniform(0, 0.08))
+                async with _session_connect_lock(session_name):
+                    await client.connect()
             except Exception as e:
                 await _log(
                     f"[red]{escape(session_name)}[/]: подключение — {escape(_err_tag(e))}: "
@@ -576,7 +595,10 @@ async def run_dm_broadcast(
             f"прокси: [white]{is_proxy_enabled()}[/]"
         )
         await asyncio.gather(
-            *(_worker(session_names[i], progress, task_id) for i in range(n_acc))
+            *(
+                _worker(session_names[i], progress, task_id, worker_index=i)
+                for i in range(n_acc)
+            )
         )
 
         drained = 0
