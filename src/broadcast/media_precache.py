@@ -8,6 +8,11 @@ from telethon import TelegramClient, utils
 from telethon.errors import FloodWaitError
 from telethon.tl.types import MessageMediaDocument, MessageMediaPhoto
 
+from src.broadcast.precache_cache import (
+    default_precache_cache_path,
+    store_cache_entry,
+    try_load_cached_handles,
+)
 from src.telethon_flood_wait import flood_wait_seconds, sleep_flood_wait
 
 
@@ -18,20 +23,30 @@ async def precache_campaign_images(
     max_flood_retries: int = 3,
     console: Console | None = None,
     session_label: str = "",
-) -> tuple[object, object, object]:
+    cache_path: Path | None = None,
+) -> tuple[tuple[object, object, object], bool]:
     """
-    Для каждого пути: send_file('me', ...), извлечь дескриптор для send_file(peer, ...).
-    Сообщения в Saved Messages не удаляем — стабильнее для повторного использования.
+    Возвращает (дескрипторы, from_local_cache).
+    При совпадении файлов с прошлой отправкой — только get_messages по сохранённым id, без новой загрузки.
     """
+    sk = session_label or "precache"
+    cpath = cache_path if cache_path is not None else default_precache_cache_path()
+
+    restored = await try_load_cached_handles(client, paths, sk, cpath)
+    if restored is not None:
+        return restored, True
+
     out: list[object] = []
+    msg_ids: list[int] = []
     for p in paths:
         msg = await _send_to_self_with_flood_retry(
             client,
             p,
             max_flood_retries=max_flood_retries,
             console=console,
-            session_label=session_label or "precache",
+            session_label=sk,
         )
+        msg_ids.append(int(msg.id))
         media = msg.media
         if isinstance(media, MessageMediaPhoto):
             out.append(utils.get_input_photo(media.photo))
@@ -41,7 +56,9 @@ async def precache_campaign_images(
             raise TypeError(
                 f"Неизвестный тип медиа после загрузки {p}: {type(media).__name__}"
             )
-    return (out[0], out[1], out[2])
+
+    await store_cache_entry(sk, paths, (msg_ids[0], msg_ids[1], msg_ids[2]), cpath)
+    return (out[0], out[1], out[2]), False
 
 
 async def _send_to_self_with_flood_retry(

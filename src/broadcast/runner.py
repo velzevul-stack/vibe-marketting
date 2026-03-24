@@ -357,16 +357,22 @@ async def run_dm_broadcast(
             cached_handles: tuple[object, object, object] | None = None
             if send_media and settings.broadcast_precache_media_to_saved:
                 try:
-                    cached_handles = await precache_campaign_images(
+                    cached_handles, _precache_from_disk = await precache_campaign_images(
                         client,
                         images,
                         console=console,
                         session_label=session_name,
                     )
-                    await _log(
-                        f"  [dim]precache[/] [dim]{escape(session_name)}[/]: "
-                        "медиа 1–3.jpg закэшировано (Избранное)"
-                    )
+                    if _precache_from_disk:
+                        await _log(
+                            f"  [dim]precache[/] [dim]{escape(session_name)}[/]: "
+                            "медиа из локального кэша [dim](те же 1–3.jpg, без новой загрузки в Избранное)[/]"
+                        )
+                    else:
+                        await _log(
+                            f"  [dim]precache[/] [dim]{escape(session_name)}[/]: "
+                            "медиа 1–3.jpg в Избранном; id сохранены для следующего прогона"
+                        )
                 except Exception as e:
                     await _log(
                         f"  [yellow]precache[/] [dim]{escape(session_name)}[/]: "
