@@ -41,8 +41,8 @@ def load_campaign_bundle(root: Path, zip_name: str = "accounts.zip") -> Campaign
     )
 
 
-def validate_campaign_bundle(b: CampaignBundle) -> list[str]:
-    """Список ошибок; пустой — ок."""
+def validate_campaign_bundle(b: CampaignBundle, *, require_images: bool = True) -> list[str]:
+    """Список ошибок; пустой — ок. require_images=False — только text_1/2, без 1.jpg–3.jpg."""
     errs: list[str] = []
     if not b.root.is_dir():
         errs.append(f"Нет каталога: {b.root}")
@@ -80,9 +80,10 @@ def validate_campaign_bundle(b: CampaignBundle) -> list[str]:
         else:
             if not p.read_text(encoding="utf-8").strip():
                 errs.append(f"Пустой файл: {label}")
-    for i, p in enumerate(b.image_paths, start=1):
-        if not p.is_file():
-            errs.append(f"Нет {i}.jpg")
+    if require_images:
+        for i, p in enumerate(b.image_paths, start=1):
+            if not p.is_file():
+                errs.append(f"Нет {i}.jpg")
     return errs
 
 

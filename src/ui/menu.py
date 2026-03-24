@@ -549,7 +549,7 @@ def _run_broadcast_from_bundle_menu() -> None:
     console.print(
         "[dim]В одном каталоге-пакете:[/] [cyan]accounts.zip[/], [cyan]apis.txt[/] [dim](api_id:api_hash)[/], "
         "[cyan]proxies.txt[/] [dim](рядом с apis: строки[/] [cyan]host:port:user:pass[/] [dim]→ http автоматически; или URL)[/], "
-        "[cyan]text_1.txt[/], [cyan]text_2.txt[/], [cyan]1.jpg … 3.jpg[/]"
+        "[cyan]text_1.txt[/], [cyan]text_2.txt[/]; [cyan]1.jpg–3.jpg[/] [dim]— если ниже выберете «да» на фото[/]"
     )
     sett = Settings()
     default_dir = _PROJECT_ROOT / sett.campaign_dir
@@ -558,7 +558,8 @@ def _run_broadcast_from_bundle_menu() -> None:
     )
     root = Path(raw).expanduser()
     bundle = load_campaign_bundle(root)
-    errs = validate_campaign_bundle(bundle)
+    send_media = Confirm.ask("Прикладывать фото к сообщениям (1.jpg–3.jpg)?", default=True)
+    errs = validate_campaign_bundle(bundle, require_images=send_media)
     if errs:
         console.print("[red]Пакет не готов:[/]")
         for e in errs:
@@ -653,6 +654,7 @@ def _run_broadcast_from_bundle_menu() -> None:
             total_limit=limit,
             exclude_invited=ex_inv,
             broadcast_mode=broadcast_mode,
+            send_media=send_media,
         )
 
     try:
@@ -745,7 +747,7 @@ def _run_system_hub_submenu() -> None:
         console.print(f"{_mk('3')} Сессии Telethon [dim](список, привязка, вход, автопривязка)[/]")
         console.print(f"{_mk('4')} API my.telegram.org [dim](опционально)[/]")
         console.print(f"{_mk('5')} Подготовка аккаунтов [dim](2FA, прокси, сброс сессий)[/]")
-        console.print(f"{_mk('6')} Рассылка из пакета [dim](ZIP, прокси, тексты, картинки, БД)[/]")
+        console.print(f"{_mk('6')} Рассылка из пакета [dim](ZIP, прокси, тексты, опц. фото, БД)[/]")
         console.print(f"{_mk('7')} Очистка аккаунтов и прокси [dim](быстрый сброс)[/]")
         console.print(f"{_mk('0')} Назад в главное меню")
         console.print()

@@ -68,6 +68,8 @@ def _cli_broadcast(
     category: str,
     zip_conflict: str,
     broadcast_mode: str,
+    *,
+    send_media: bool = True,
 ) -> int:
     """Рассылка из каталога-пакета без меню (ZIP, apis.txt, proxies.txt, рассылка)."""
     import asyncio
@@ -90,7 +92,7 @@ def _cli_broadcast(
     con = Console()
     root = Path(dir_path).expanduser().resolve()
     bundle = load_campaign_bundle(root)
-    errs = validate_campaign_bundle(bundle)
+    errs = validate_campaign_bundle(bundle, require_images=send_media)
     if errs:
         for e in errs:
             con.print(f"[red]{e}[/]")
@@ -130,6 +132,7 @@ def _cli_broadcast(
             total_limit=limit,
             exclude_invited=True,
             broadcast_mode=mode,
+            send_media=send_media,
         )
 
     totals = asyncio.run(_run())
@@ -247,7 +250,7 @@ def main() -> None:
     parser.add_argument(
         "--broadcast",
         metavar="DIR",
-        help="Рассылка из пакета (accounts.zip, apis.txt, proxies.txt, text_1/2.txt, 1–3.jpg)",
+        help="Рассылка из пакета (accounts.zip, apis.txt, proxies.txt, text_1/2.txt; фото — или --broadcast-text-only)",
     )
     parser.add_argument(
         "--broadcast-limit",
@@ -272,6 +275,11 @@ def main() -> None:
         choices=["normal", "privacy_retry"],
         default="normal",
         help="normal — обычная очередь; privacy_retry — только после UserPrivacyRestricted",
+    )
+    parser.add_argument(
+        "--broadcast-text-only",
+        action="store_true",
+        help="Рассылка без вложений: только text_1/2.txt (без 1.jpg–3.jpg)",
     )
     parser.add_argument(
         "--clear-accounts",
@@ -322,6 +330,7 @@ def main() -> None:
                 args.broadcast_category,
                 args.broadcast_zip_conflict,
                 args.broadcast_mode,
+                send_media=not args.broadcast_text_only,
             )
         )
     if args.clear_accounts or args.wipe_sessions or args.clear_proxies:
