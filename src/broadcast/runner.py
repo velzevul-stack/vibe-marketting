@@ -34,6 +34,7 @@ from src.broadcast.bundle import CampaignBundle, read_campaign_texts
 from src.broadcast.media_precache import precache_campaign_images
 from src.broadcast.text_jitter import apply_caption_homoglyph
 from src.config import Settings, load_accounts, is_proxy_enabled, telethon_session_file
+from src.telethon_flood_wait import flood_wait_seconds, sleep_flood_wait
 from src.db.database import Database
 from src.invite.manager import AccountPool, smart_delay
 
@@ -110,11 +111,13 @@ async def run_dm_broadcast(
     total_limit: int,
     exclude_invited: bool = True,
     broadcast_mode: BroadcastMode = "normal",
+    send_media: bool = True,
 ) -> BroadcastTotals:
     """
     Общая asyncio.Queue получателей; при флуде/лимите суток и т.п. задача возвращается в пул
     для других аккаунтов (лимит разных аккаунтов на пользователя — в settings).
     broadcast_mode=privacy_retry — только очередь после UserPrivacyRestricted.
+    send_media=False — только текст (send_message), без фото и прекэша.
     """
     await db.init()
     texts = read_campaign_texts(bundle)
@@ -351,10 +354,15 @@ async def run_dm_broadcast(
                 await _degraded_relay_loop(session_name, progress, task_id)
                 return
 
-            cached_handles: tuple[object, object, object] | None
-            if settings.broadcast_precache_media_to_saved:
+            cached_handles: tuple[object, object, object] | None = None
+            if send_media and settings.broadcast_precache_media_to_saved:
                 try:
-                    cached_handles = await precache_campaign_images(client, images)
+                    cached_handles = await precache_campaign_images(
+                        client,
+                        images,
+                        console=console,
+                        session_label=session_name,
+                    )
                     await _log(
                         f"  [dim]precache[/] [dim]{escape(session_name)}[/]: "
                         "медиа 1–3.jpg закэшировано (Избранное)"
@@ -365,7 +373,7 @@ async def run_dm_broadcast(
                         f"{escape(_err_tag(e))}: {_err_detail(e)} — отправка с диска"
                     )
                     cached_handles = None
-            else:
+            elif send_media:
                 cached_handles = None
 
             while True:
@@ -418,7 +426,7 @@ async def run_dm_broadcast(
                 h = _user_stable_hash(u)
                 raw_caption = texts[h % 2]
                 caption = apply_caption_homoglyph(raw_caption, settings)
-                img_path = images[h % 3]
+                img_path = images[h % 3] if send_media else None
                 ident = u.get("username") or u.get("telegram_id") or "?"
                 preview = str(ident)[:40]
 
@@ -442,12 +450,16 @@ async def run_dm_broadcast(
                         await _add_totals(session_name, skipped=1)
                         await _finalize_user(progress, task_id)
                         return
-                    media = (
-                        cached_handles[h % 3]
-                        if cached_handles is not None
-                        else img_path
-                    )
-                    await client.send_file(peer, media, caption=caption)
+                    if send_media:
+                        assert img_path is not None
+                        media = (
+                            cached_handles[h % 3]
+                            if cached_handles is not None
+                            else img_path
+                        )
+                        await client.send_file(peer, media, caption=caption)
+                    else:
+                        await client.send_message(peer, caption)
                     if uid is not None:
                         await db.mark_broadcast_sent(int(uid))
                         await db.increment_broadcast_sent_today_utc(session_name)
@@ -458,23 +470,11 @@ async def run_dm_broadcast(
                     await _add_totals(session_name, sent=1)
                     await _finalize_user(progress, task_id)
 
-                try:
-                    await _try_send()
-                except FloodWaitError as e:
-                    pool.mark_flood_wait(session_name, e.seconds)
-                    await asyncio.sleep(e.seconds)
-                    try:
-                        await _try_send()
-                    except Exception as e2:
-                        await _log(
-                            f"  [yellow]relay[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
-                            f"FloodWait повтор: {escape(_err_tag(e2))}: {_err_detail(e2)}"
-                        )
-                        await _try_requeue(
-                            u, tried, session_name, preview, progress, task_id
-                        )
-                        continue
-                except PeerFloodError as e:
+                async def _peer_flood_after(e: PeerFloodError) -> str:
+                    """
+                    Возврат: exit_worker — выйти из воркера; continue_outer — след. получатель;
+                    done — отправка после паузы успешна.
+                    """
                     pool.mark_flood_wait(session_name, _PEER_FLOOD_COOLDOWN_SEC)
                     await _log(
                         f"  [yellow]peer_flood[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
@@ -483,6 +483,7 @@ async def run_dm_broadcast(
                     await asyncio.sleep(_PEER_FLOOD_COOLDOWN_SEC)
                     try:
                         await _try_send()
+                        return "done"
                     except PeerFloodError as e2:
                         await _log(
                             f"  [yellow]relay[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
@@ -497,14 +498,13 @@ async def run_dm_broadcast(
                             u, tried, session_name, preview, progress, task_id
                         )
                         async with state_lock:
-                            must_exit = session_name in retired
-                        if must_exit:
-                            try:
-                                await client.disconnect()
-                            except Exception:
-                                pass
-                            return
-                        continue
+                            if session_name in retired:
+                                try:
+                                    await client.disconnect()
+                                except Exception:
+                                    pass
+                                return "exit_worker"
+                        return "continue_outer"
                     except Exception as e2:
                         await _log(
                             f"  [yellow]relay[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
@@ -513,6 +513,62 @@ async def run_dm_broadcast(
                         await _try_requeue(
                             u, tried, session_name, preview, progress, task_id
                         )
+                        return "continue_outer"
+
+                try:
+                    await _try_send()
+                except FloodWaitError as e_first:
+                    e_fw = e_first
+                    send_ok = False
+                    flood_peer_continue = False
+                    for _fw_round in range(50):
+                        sec = flood_wait_seconds(e_fw)
+                        if sec <= 0:
+                            await _log(
+                                f"  [yellow]FloodWait[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
+                                "сервер не вернул длительность, relay"
+                            )
+                            break
+                        pool.mark_flood_wait(session_name, sec)
+                        await _log(
+                            f"  [yellow]FloodWait[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
+                            f"ожидание [bold]{sec}[/] с полностью [dim](раунд {_fw_round + 1})[/]"
+                        )
+                        await sleep_flood_wait(
+                            sec, console=console, session_label=session_name
+                        )
+                        try:
+                            await _try_send()
+                            send_ok = True
+                            break
+                        except FloodWaitError as e_again:
+                            e_fw = e_again
+                            continue
+                        except PeerFloodError as e_pf:
+                            pr = await _peer_flood_after(e_pf)
+                            if pr == "exit_worker":
+                                return
+                            if pr == "continue_outer":
+                                flood_peer_continue = True
+                                break
+                            send_ok = True
+                            break
+                    if flood_peer_continue:
+                        continue
+                    if not send_ok:
+                        await _log(
+                            f"  [yellow]relay[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
+                            "FloodWait после ожиданий"
+                        )
+                        await _try_requeue(
+                            u, tried, session_name, preview, progress, task_id
+                        )
+                        continue
+                except PeerFloodError as e:
+                    pr = await _peer_flood_after(e)
+                    if pr == "exit_worker":
+                        return
+                    if pr == "continue_outer":
                         continue
                 except UserPrivacyRestrictedError:
                     if uid is not None:
@@ -586,12 +642,17 @@ async def run_dm_broadcast(
             total=total_tasks,
         )
         precache_on = settings.broadcast_precache_media_to_saved
+        media_part = (
+            f"медиа: [white]да[/], precache: [white]{precache_on}[/]"
+            if send_media
+            else "медиа: [white]нет[/] [dim](только текст)[/]"
+        )
         await _log(
             f"[bold]Старт рассылки[/] ([dim]{escape(mode_label)}[/]): аккаунтов [white]{n_acc}[/], "
             f"получателей [white]{len(users)}[/], лимит/акк/сутки UTC: [white]{daily_limit or '—'}[/], "
             f"relay max акк/получатель: [white]{max_attempts}[/], "
             f"retire после PeerFlood: [white]{retire_after}[/], "
-            f"precache медиа: [white]{precache_on}[/], "
+            f"{media_part}, "
             f"прокси: [white]{is_proxy_enabled()}[/]"
         )
         await asyncio.gather(

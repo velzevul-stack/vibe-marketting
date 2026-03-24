@@ -24,6 +24,7 @@ from src.config import (
     Settings,
     telethon_session_file,
 )
+from src.telethon_flood_wait import flood_wait_seconds, sleep_flood_wait
 
 
 @dataclass
@@ -253,8 +254,9 @@ class InviteManager:
             self.pool.mark_used(session_name)
             return True
         except FloodWaitError as e:
-            self.pool.mark_flood_wait(session_name, e.seconds)
-            await asyncio.sleep(e.seconds)
+            sec = flood_wait_seconds(e)
+            self.pool.mark_flood_wait(session_name, sec)
+            await sleep_flood_wait(sec, console=None, session_label=session_name)
             return await self.add_to_contacts_with_session(username, session_name)
         except Exception:
             return False
@@ -278,7 +280,8 @@ class InviteManager:
             )
             return True
         except FloodWaitError as e:
-            await asyncio.sleep(e.seconds)
+            sec = flood_wait_seconds(e)
+            await sleep_flood_wait(sec, console=None, session_label="контакты")
             return await self.add_to_contacts_with_client(client, username)
         except Exception:
             return False
@@ -337,8 +340,9 @@ class InviteManager:
                 self.pool.mark_used(session_name)
                 return True, session_name, ""
             except FloodWaitError as e:
-                self.pool.mark_flood_wait(session_name, e.seconds)
-                await asyncio.sleep(e.seconds)
+                sec = flood_wait_seconds(e)
+                self.pool.mark_flood_wait(session_name, sec)
+                await sleep_flood_wait(sec, console=None, session_label=session_name)
                 return await self.join_group_with_session(link_clean, session_name)
             except Exception as e:
                 last_err = _join_error_message(e)
@@ -394,8 +398,9 @@ class InviteManager:
                     invited += len(batch)
                     self.pool.mark_used(session_name)
                 except FloodWaitError as e:
-                    self.pool.mark_flood_wait(session_name, e.seconds)
-                    await asyncio.sleep(e.seconds)
+                    sec = flood_wait_seconds(e)
+                    self.pool.mark_flood_wait(session_name, sec)
+                    await sleep_flood_wait(sec, console=None, session_label=session_name)
                     try:
                         await client(InviteToChannelRequest(channel, batch))
                         invited += len(batch)
@@ -524,8 +529,9 @@ class InviteManager:
             self.pool.mark_used(state.session_name)
             return len(entities), invited_ids
         except FloodWaitError as e:
-            self.pool.mark_flood_wait(state.session_name, e.seconds)
-            await asyncio.sleep(e.seconds)
+            sec = flood_wait_seconds(e)
+            self.pool.mark_flood_wait(state.session_name, sec)
+            await sleep_flood_wait(sec, console=None, session_label=state.session_name)
             return await self.invite_to_channel(channel_username, users)
         except Exception:
             return 0, []

@@ -1,8 +1,6 @@
 """Скрапинг сообщений из групп через Telethon."""
 import asyncio
-import math
 import re
-import time
 
 from rich.console import Console
 from rich.markup import escape
@@ -20,40 +18,10 @@ from telethon.errors import (
 from src.config import Settings
 from src.db import get_db
 from src.invite.manager import AccountPool
+from src.telethon_flood_wait import flood_wait_seconds, sleep_flood_wait
 from src.verify.parser import extract_sellers
 
 _console = Console()
-
-
-async def _sleep_flood_wait_countdown(total_seconds: int, session_label: str) -> None:
-    """Ожидание FloodWait с полосой прогресса и оставшимся временем (обновление ~1 с)."""
-    if total_seconds <= 0:
-        return
-    sess = escape(session_label)
-    total = float(total_seconds)
-    deadline = time.monotonic() + total
-    _console.print(
-        f"\n[yellow]FloodWait:[/] пауза [bold]{total_seconds}[/] с "
-        f"([dim]сессия[/] [cyan]{sess}[/])"
-    )
-    _console.print("[dim]Ожидание (обновляется каждую секунду)…[/]")
-    while True:
-        left = deadline - time.monotonic()
-        if left <= 0:
-            break
-        left_i = max(0, math.ceil(left - 1e-9))
-        elapsed = total - left
-        pct = min(100.0, max(0.0, 100.0 * elapsed / total)) if total else 100.0
-        bar_w = 20
-        filled = int(bar_w * pct / 100.0 + 0.5)
-        filled = min(bar_w, max(0, filled))
-        bar = "█" * filled + "░" * (bar_w - filled)
-        _console.print(
-            f"\r[green][{bar}][/] [yellow]осталось[/] [bold]{left_i}[/] с [dim]({pct:.1f}%)[/]  ",
-            end="",
-        )
-        await asyncio.sleep(min(1.0, max(left, 0)))
-    _console.print("\n[dim]FloodWait завершён, продолжаем сбор…[/]")
 
 
 # Публичный @username Telegram: буква/цифра/_, обычно от 5 символов; допускаем 4 для старых ников.
@@ -240,10 +208,16 @@ async def scrape_group(
                     acc_pool.mark_used(state.session_name)
                 break
             except FloodWaitError as e:
+                sec = flood_wait_seconds(e)
                 if acc_pool is not None and session_for_flood:
-                    acc_pool.mark_flood_wait(session_for_flood, e.seconds)
+                    acc_pool.mark_flood_wait(session_for_flood, sec)
                 label = str(session_for_flood) if session_for_flood else "отдельный вход"
-                await _sleep_flood_wait_countdown(e.seconds, label)
+                await sleep_flood_wait(
+                    sec,
+                    console=_console,
+                    session_label=label,
+                    prefix="FloodWait (сбор)",
+                )
                 continue
             except (
                 UsernameNotOccupiedError,
