@@ -245,13 +245,20 @@ class InviteManager:
             await client.connect()
             if not await client.is_user_authorized():
                 return False
-            username_clean = username.lstrip("@")
-            await client(AddContactRequest(
-                id=username_clean,
-                first_name=username_clean,
-                last_name="",
-                phone="",
-            ))
+            username_clean = username.strip().lstrip("@")
+            if not username_clean:
+                return False
+            ent = await get_entity_username_try_at_prefix(client, username_clean)
+            fn = (getattr(ent, "first_name", None) or "").strip() or username_clean[:64]
+            ln = (getattr(ent, "last_name", None) or "").strip()
+            await client(
+                AddContactRequest(
+                    id=ent,
+                    first_name=fn,
+                    last_name=ln,
+                    phone="",
+                )
+            )
             self.pool.mark_used(session_name)
             return True
         except FloodWaitError as e:
@@ -270,12 +277,17 @@ class InviteManager:
             await client.connect()
             if not await client.is_user_authorized():
                 return False
-            username_clean = username.lstrip("@")
+            username_clean = username.strip().lstrip("@")
+            if not username_clean:
+                return False
+            ent = await get_entity_username_try_at_prefix(client, username_clean)
+            fn = (getattr(ent, "first_name", None) or "").strip() or username_clean[:64]
+            ln = (getattr(ent, "last_name", None) or "").strip()
             await client(
                 AddContactRequest(
-                    id=username_clean,
-                    first_name=username_clean,
-                    last_name="",
+                    id=ent,
+                    first_name=fn,
+                    last_name=ln,
                     phone="",
                 )
             )
