@@ -19,6 +19,7 @@ from telethon import TelegramClient
 from telethon.errors import (
     FloodWaitError,
     InputUserDeactivatedError,
+    PeerFloodError,
     PeerIdInvalidError,
     RPCError,
     UserIdInvalidError,
@@ -35,6 +36,9 @@ from src.db.database import Database
 from src.invite.manager import AccountPool, smart_delay
 
 BroadcastMode = Literal["normal", "privacy_retry"]
+
+# PeerFloodError не содержит seconds от сервера — консервативная пауза перед повтором
+_PEER_FLOOD_COOLDOWN_SEC = 120
 
 
 def _err_tag(exc: BaseException) -> str:
@@ -262,6 +266,27 @@ async def run_dm_broadcast(
                     await asyncio.sleep(e.seconds)
                     try:
                         await _try_send()
+                    except Exception as e2:
+                        await _log(
+                            f"  [red]FAIL[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
+                            f"{escape(_err_tag(e2))}: {_err_detail(e2)}"
+                        )
+                        await _add_totals(session_name, failed=1)
+                except PeerFloodError as e:
+                    pool.mark_flood_wait(session_name, _PEER_FLOOD_COOLDOWN_SEC)
+                    await _log(
+                        f"  [yellow]peer_flood[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
+                        f"пауза {_PEER_FLOOD_COOLDOWN_SEC}s, повтор… {_err_detail(e)}"
+                    )
+                    await asyncio.sleep(_PEER_FLOOD_COOLDOWN_SEC)
+                    try:
+                        await _try_send()
+                    except PeerFloodError as e2:
+                        await _log(
+                            f"  [red]FAIL[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
+                            f"PeerFloodError (повтор): {_err_detail(e2)}"
+                        )
+                        await _add_totals(session_name, failed=1)
                     except Exception as e2:
                         await _log(
                             f"  [red]FAIL[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
