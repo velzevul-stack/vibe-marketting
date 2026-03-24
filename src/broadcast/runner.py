@@ -63,6 +63,23 @@ def _user_stable_hash(u: dict) -> int:
     return hash(str(u.get("telegram_id") or u.get("username") or ""))
 
 
+def _is_username_missing_telegram_error(exc: BaseException) -> bool:
+    """Нет такого @username в Telegram (No user has…, UsernameNotOccupied и т.д.)."""
+    if isinstance(exc, (UsernameNotOccupiedError, UsernameInvalidError)):
+        return True
+    es = (str(exc) or "").lower()
+    if not es:
+        return False
+    needles = (
+        "no user has",
+        "nobody is using",
+        "cannot find any entity",
+        "username is not occupied",
+        "username invalid",
+    )
+    return any(n in es for n in needles)
+
+
 async def _resolve_peer(client: TelegramClient, u: dict):
     """
     Сначала по числовому telegram_id; при любой ошибке резолва — fallback на username
@@ -97,6 +114,7 @@ class BroadcastTotals:
     privacy_skipped: int = 0
     deferred_daily_cap: int = 0
     relay_exhausted: int = 0
+    username_not_found_marked: int = 0
     by_session: dict[str, tuple[int, int, int, int, int, int]] = field(default_factory=dict)
     # sent, failed, skipped, privacy, daily_cap, relay_exhausted
 
@@ -139,6 +157,7 @@ async def run_dm_broadcast(
         exclude_broadcast=True,
         exclude_privacy_blocked=exclude_privacy,
         only_privacy_retry=only_privacy,
+        exclude_username_not_found=True,
     )
     if not users:
         console.print("[yellow]Нет получателей (категория / лимит / фильтры рассылки).[/]")
@@ -209,6 +228,7 @@ async def run_dm_broadcast(
         privacy: int = 0,
         dailycap: int = 0,
         relay: int = 0,
+        username_nf: int = 0,
     ) -> None:
         async with totals_lock:
             totals.sent += sent
@@ -217,6 +237,7 @@ async def run_dm_broadcast(
             totals.privacy_skipped += privacy
             totals.deferred_daily_cap += dailycap
             totals.relay_exhausted += relay
+            totals.username_not_found_marked += username_nf
             s, f, sk, pr, dc, rx = totals.by_session[sn]
             totals.by_session[sn] = (
                 s + sent,
@@ -512,6 +533,16 @@ async def run_dm_broadcast(
                                 return "exit_worker"
                         return "continue_outer"
                     except Exception as e2:
+                        if uid is not None and _is_username_missing_telegram_error(e2):
+                            await db.mark_username_not_found(int(uid))
+                            await _log(
+                                f"  [yellow]skip[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
+                                f"нет @username в TG [dim](после peer_flood)[/]: "
+                                f"{escape(_err_tag(e2))}: {_err_detail(e2)}"
+                            )
+                            await _add_totals(session_name, skipped=1, username_nf=1)
+                            await _finalize_user(progress, task_id)
+                            return "continue_outer"
                         await _log(
                             f"  [yellow]relay[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
                             f"{escape(_err_tag(e2))}: {_err_detail(e2)}"
@@ -585,12 +616,22 @@ async def run_dm_broadcast(
                     )
                     await _add_totals(session_name, privacy=1)
                     await _finalize_user(progress, task_id)
+                except (UsernameNotOccupiedError, UsernameInvalidError) as e:
+                    if uid is not None:
+                        await db.mark_username_not_found(int(uid))
+                        await _add_totals(session_name, skipped=1, username_nf=1)
+                    else:
+                        await _add_totals(session_name, skipped=1)
+                    await _log(
+                        f"  [yellow]skip[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
+                        f"нет @username в Telegram [dim](в БД помечен)[/]: "
+                        f"{escape(_err_tag(e))}: {_err_detail(e)}"
+                    )
+                    await _finalize_user(progress, task_id)
                 except (
                     UserIsBlockedError,
                     PeerIdInvalidError,
                     InputUserDeactivatedError,
-                    UsernameNotOccupiedError,
-                    UsernameInvalidError,
                     UserIdInvalidError,
                 ) as e:
                     await _log(
@@ -600,30 +641,56 @@ async def run_dm_broadcast(
                     await _add_totals(session_name, skipped=1)
                     await _finalize_user(progress, task_id)
                 except ValueError as e:
+                    un_m = (
+                        uid is not None and _is_username_missing_telegram_error(e)
+                    )
+                    if un_m:
+                        await db.mark_username_not_found(int(uid))
                     await _log(
                         f"  [yellow]skip[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
                         f"ValueError: {_err_detail(e)}"
+                        + (" [dim](в БД помечен как нет @username)[/]" if un_m else "")
                     )
-                    await _add_totals(session_name, skipped=1)
+                    await _add_totals(
+                        session_name, skipped=1, username_nf=1 if un_m else 0
+                    )
                     await _finalize_user(progress, task_id)
                 except RPCError as e:
-                    await _log(
-                        f"  [yellow]relay[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
-                        f"RPCError: {_err_detail(e)}"
-                    )
-                    await _try_requeue(
-                        u, tried, session_name, preview, progress, task_id
-                    )
-                    continue
+                    if uid is not None and _is_username_missing_telegram_error(e):
+                        await db.mark_username_not_found(int(uid))
+                        await _log(
+                            f"  [yellow]skip[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
+                            f"нет @username (RPC), в БД помечен: {_err_detail(e)}"
+                        )
+                        await _add_totals(session_name, skipped=1, username_nf=1)
+                        await _finalize_user(progress, task_id)
+                    else:
+                        await _log(
+                            f"  [yellow]relay[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
+                            f"RPCError: {_err_detail(e)}"
+                        )
+                        await _try_requeue(
+                            u, tried, session_name, preview, progress, task_id
+                        )
+                        continue
                 except Exception as e:
-                    await _log(
-                        f"  [yellow]relay[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
-                        f"{escape(_err_tag(e))}: {_err_detail(e)}"
-                    )
-                    await _try_requeue(
-                        u, tried, session_name, preview, progress, task_id
-                    )
-                    continue
+                    if uid is not None and _is_username_missing_telegram_error(e):
+                        await db.mark_username_not_found(int(uid))
+                        await _log(
+                            f"  [yellow]skip[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
+                            f"нет @username, в БД помечен: {escape(_err_tag(e))}: {_err_detail(e)}"
+                        )
+                        await _add_totals(session_name, skipped=1, username_nf=1)
+                        await _finalize_user(progress, task_id)
+                    else:
+                        await _log(
+                            f"  [yellow]relay[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
+                            f"{escape(_err_tag(e))}: {_err_detail(e)}"
+                        )
+                        await _try_requeue(
+                            u, tried, session_name, preview, progress, task_id
+                        )
+                        continue
 
                 await asyncio.sleep(
                     smart_delay(settings.delay_broadcast_min, settings.delay_broadcast_max)

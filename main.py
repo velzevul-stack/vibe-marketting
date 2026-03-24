@@ -136,10 +136,15 @@ def _cli_broadcast(
         )
 
     totals = asyncio.run(_run())
+    suf = (
+        f" username_not_found_marked={totals.username_not_found_marked}"
+        if totals.username_not_found_marked
+        else ""
+    )
     con.print(
         f"[bold]Рассылка завершена:[/] ok={totals.sent} fail={totals.failed} "
         f"skip={totals.skipped} privacy={totals.privacy_skipped} daily_cap={totals.deferred_daily_cap} "
-        f"relay_exhausted={totals.relay_exhausted}"
+        f"relay_exhausted={totals.relay_exhausted}{suf}"
     )
     return 0
 

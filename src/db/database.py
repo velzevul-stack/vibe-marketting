@@ -70,6 +70,7 @@ class Database:
             await db.commit()
             await self._migrate_users_broadcast_at(db)
             await self._migrate_users_broadcast_privacy(db)
+            await self._migrate_users_username_not_found(db)
 
     async def _migrate_users_broadcast_at(self, db) -> None:
         """Добавить колонку broadcast_at в существующих БД."""
@@ -87,6 +88,15 @@ class Database:
         cols = {r[1] for r in rows}
         if "broadcast_privacy_blocked_at" not in cols:
             await db.execute("ALTER TABLE users ADD COLUMN broadcast_privacy_blocked_at TEXT")
+            await db.commit()
+
+    async def _migrate_users_username_not_found(self, db) -> None:
+        """Пометка: в Telegram нет такого @username (No user has…)."""
+        cur = await db.execute("PRAGMA table_info(users)")
+        rows = await cur.fetchall()
+        cols = {r[1] for r in rows}
+        if "username_not_found_at" not in cols:
+            await db.execute("ALTER TABLE users ADD COLUMN username_not_found_at TEXT")
             await db.commit()
 
     async def add_chat(self, telegram_id: str, title: str, link: str, members_count: int = 0, source: str = "manual") -> None:
@@ -146,12 +156,14 @@ class Database:
         exclude_broadcast: bool = False,
         exclude_privacy_blocked: bool = True,
         only_privacy_retry: bool = False,
+        exclude_username_not_found: bool = False,
     ) -> list[dict]:
         """
         Получить пользователей.
         exclude_broadcast — без успешной рассылки (broadcast_at).
         exclude_privacy_blocked — для обычной рассылки: без очереди privacy (уже отмеченных).
         only_privacy_retry — только очередь повтора (privacy без успешного broadcast_at).
+        exclude_username_not_found — без строк с username_not_found_at (нет @ в Telegram).
         """
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
@@ -170,6 +182,10 @@ class Database:
             elif exclude_privacy_blocked:
                 conds.append(
                     "(broadcast_privacy_blocked_at IS NULL OR broadcast_privacy_blocked_at = '')"
+                )
+            if exclude_username_not_found:
+                conds.append(
+                    "(username_not_found_at IS NULL OR username_not_found_at = '')"
                 )
             if category:
                 conds.append("category = ?")
@@ -214,6 +230,15 @@ class Database:
             await db.execute(
                 "UPDATE users SET broadcast_privacy_blocked_at = ? WHERE id = ?",
                 (datetime.now().isoformat(), user_id),
+            )
+            await db.commit()
+
+    async def mark_username_not_found(self, user_id: int) -> None:
+        """Telegram: нет пользователя с таким @username (строка остаётся в БД)."""
+        async with self._connect() as db:
+            await db.execute(
+                "UPDATE users SET username_not_found_at = ? WHERE id = ?",
+                (datetime.now(timezone.utc).isoformat(), user_id),
             )
             await db.commit()
 

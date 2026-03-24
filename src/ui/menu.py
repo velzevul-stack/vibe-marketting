@@ -665,11 +665,17 @@ def _run_broadcast_from_bundle_menu() -> None:
         return
 
     console.print()
+    un_nf = totals.username_not_found_marked
+    un_part = (
+        f", нет @username в TG [dim](пометка в БД)[/] [white]{un_nf}[/]"
+        if un_nf
+        else ""
+    )
     console.print(
         f"[bold green]Итого:[/] отправлено [white]{totals.sent}[/], "
         f"ошибок [red]{totals.failed}[/], пропусков [yellow]{totals.skipped}[/], "
         f"privacy [magenta]{totals.privacy_skipped}[/], лимит/день [cyan]{totals.deferred_daily_cap}[/], "
-        f"relay [red]{totals.relay_exhausted}[/]"
+        f"relay [red]{totals.relay_exhausted}[/]{un_part}"
     )
     for sn, row in sorted(totals.by_session.items(), key=lambda x: x[0]):
         s, f, sk, pr, dc, rx = row
@@ -1279,6 +1285,7 @@ async def _add_contacts_workflow(
             exclude_broadcast=True,
             exclude_privacy_blocked=False,
             only_privacy_retry=True,
+            exclude_username_not_found=True,
         )
     else:
         users = await db.get_users(
@@ -1286,6 +1293,7 @@ async def _add_contacts_workflow(
             limit=50,
             exclude_added_to_contacts=exclude_added,
             exclude_broadcast=False,
+            exclude_username_not_found=True,
         )
     if not users:
         console.print("[yellow]Нет пользователей для добавления.[/]")
