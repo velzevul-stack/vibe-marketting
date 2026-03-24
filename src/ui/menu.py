@@ -666,13 +666,15 @@ def _run_broadcast_from_bundle_menu() -> None:
     console.print(
         f"[bold green]Итого:[/] отправлено [white]{totals.sent}[/], "
         f"ошибок [red]{totals.failed}[/], пропусков [yellow]{totals.skipped}[/], "
-        f"privacy [magenta]{totals.privacy_skipped}[/], лимит/день [cyan]{totals.deferred_daily_cap}[/]"
+        f"privacy [magenta]{totals.privacy_skipped}[/], лимит/день [cyan]{totals.deferred_daily_cap}[/], "
+        f"relay [red]{totals.relay_exhausted}[/]"
     )
     for sn, row in sorted(totals.by_session.items(), key=lambda x: x[0]):
-        s, f, sk, pr, dc = row
-        if s or f or sk or pr or dc:
+        s, f, sk, pr, dc, rx = row
+        if s or f or sk or pr or dc or rx:
             console.print(
-                f"  [dim]{escape(str(sn))}:[/] ok={s} fail={f} skip={sk} privacy={pr} daily_cap={dc}"
+                f"  [dim]{escape(str(sn))}:[/] ok={s} fail={f} skip={sk} privacy={pr} "
+                f"daily_cap={dc} relay={rx}"
             )
     Prompt.ask("\n[dim]Enter — назад[/]", default="")
 

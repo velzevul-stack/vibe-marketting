@@ -178,6 +178,21 @@ class Settings:
             )
         except (TypeError, ValueError):
             self.broadcast_homoglyph_probability = 0.12
+        # Сколько разных аккаунтов может попробовать одного получателя за один прогон (релокализация после флуда и т.д.)
+        try:
+            _ma = int(self._data.get("broadcast_max_account_attempts_per_user", 3))
+        except (TypeError, ValueError):
+            _ma = 3
+        self.broadcast_max_account_attempts_per_user: int = max(1, min(_ma, 50))
+        try:
+            _rf = int(self._data.get("broadcast_retire_session_after_peer_floods", 2))
+        except (TypeError, ValueError):
+            _rf = 2
+        self.broadcast_retire_session_after_peer_floods: int = max(1, min(_rf, 20))
+        # Перед рассылкой загрузить 1.jpg–3.jpg в «Избранное» и слать получателям по InputPhoto/Document (меньше upload)
+        self.broadcast_precache_media_to_saved: bool = bool(
+            self._data.get("broadcast_precache_media_to_saved", True)
+        )
 
 
 def clone_settings(**overrides) -> Settings:

@@ -33,6 +33,11 @@
   "broadcast_homoglyph_enabled": true,
   "_homoglyph_p_comment": "Вероятность замены одной буквы е/а/о (кирил.) на латиницу в подписи к картинке",
   "broadcast_homoglyph_probability": 0.12,
+  "_broadcast_relay_comment": "Макс. число разных аккаунтов на одного получателя за прогон; после PeerFlood N раз — сессия отдыхает до конца прогона",
+  "broadcast_max_account_attempts_per_user": 3,
+  "broadcast_retire_session_after_peer_floods": 2,
+  "_broadcast_precache_comment": "true: перед прогоном залить три картинки в Избранное и слать ЛС по кэшу медиа; false — каждый раз с диска",
+  "broadcast_precache_media_to_saved": true,
 
   "telethon_default_api": {
     "_comment": "Для автопривязки .session (меню сессий → 4): общий api_id/api_hash с my.telegram.org",

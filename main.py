@@ -135,7 +135,8 @@ def _cli_broadcast(
     totals = asyncio.run(_run())
     con.print(
         f"[bold]Рассылка завершена:[/] ok={totals.sent} fail={totals.failed} "
-        f"skip={totals.skipped} privacy={totals.privacy_skipped} daily_cap={totals.deferred_daily_cap}"
+        f"skip={totals.skipped} privacy={totals.privacy_skipped} daily_cap={totals.deferred_daily_cap} "
+        f"relay_exhausted={totals.relay_exhausted}"
     )
     return 0
 

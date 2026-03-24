@@ -1,7 +1,8 @@
-"""Параллельная рассылка ЛС: один asyncio-воркер на аккаунт, разбиение базы по modulo."""
+"""Параллельная рассылка ЛС: воркер на аккаунт + общая очередь с релокализацией при флуде/лимитах."""
 from __future__ import annotations
 
 import asyncio
+import random
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -30,6 +31,7 @@ from telethon.errors import (
 )
 
 from src.broadcast.bundle import CampaignBundle, read_campaign_texts
+from src.broadcast.media_precache import precache_campaign_images
 from src.broadcast.text_jitter import apply_caption_homoglyph
 from src.config import Settings, load_accounts, is_proxy_enabled
 from src.db.database import Database
@@ -37,8 +39,8 @@ from src.invite.manager import AccountPool, smart_delay
 
 BroadcastMode = Literal["normal", "privacy_retry"]
 
-# PeerFloodError не содержит seconds от сервера — консервативная пауза перед повтором
 _PEER_FLOOD_COOLDOWN_SEC = 120
+_SHUTDOWN = object()
 
 
 def _err_tag(exc: BaseException) -> str:
@@ -48,6 +50,16 @@ def _err_tag(exc: BaseException) -> str:
 def _err_detail(exc: BaseException, limit: int = 120) -> str:
     s = (str(exc) or "").strip() or repr(exc)
     return escape(s[:limit])
+
+
+def _user_stable_hash(u: dict) -> int:
+    uid = u.get("id")
+    if uid is not None:
+        try:
+            return int(uid)
+        except (TypeError, ValueError):
+            pass
+    return hash(str(u.get("telegram_id") or u.get("username") or ""))
 
 
 async def _resolve_peer(client: TelegramClient, u: dict):
@@ -70,6 +82,12 @@ async def _resolve_peer(client: TelegramClient, u: dict):
     return None
 
 
+@dataclass(frozen=True)
+class _WorkItem:
+    user: dict
+    tried: frozenset[str]
+
+
 @dataclass
 class BroadcastTotals:
     sent: int = 0
@@ -77,8 +95,9 @@ class BroadcastTotals:
     skipped: int = 0
     privacy_skipped: int = 0
     deferred_daily_cap: int = 0
-    by_session: dict[str, tuple[int, int, int, int, int]] = field(default_factory=dict)
-    # sent, failed, skipped, privacy, daily_cap
+    relay_exhausted: int = 0
+    by_session: dict[str, tuple[int, int, int, int, int, int]] = field(default_factory=dict)
+    # sent, failed, skipped, privacy, daily_cap, relay_exhausted
 
 
 async def run_dm_broadcast(
@@ -93,8 +112,8 @@ async def run_dm_broadcast(
     broadcast_mode: BroadcastMode = "normal",
 ) -> BroadcastTotals:
     """
-    Рассылка пользователям из БД: тексты чередуются по индексу внутри воркера,
-    картинки по циклу 1.jpg → 3.jpg.
+    Общая asyncio.Queue получателей; при флуде/лимите суток и т.п. задача возвращается в пул
+    для других аккаунтов (лимит разных аккаунтов на пользователя — в settings).
     broadcast_mode=privacy_retry — только очередь после UserPrivacyRestricted.
     """
     await db.init()
@@ -133,18 +152,26 @@ async def run_dm_broadcast(
     if daily_limit < 0:
         daily_limit = 0
 
+    max_attempts = int(settings.broadcast_max_account_attempts_per_user)
+    retire_after = int(settings.broadcast_retire_session_after_peer_floods)
+
     n_acc = len(session_names)
-    chunks: list[list[dict]] = [[] for _ in range(n_acc)]
-    for i, u in enumerate(users):
-        chunks[i % n_acc].append(u)
+    work_q: asyncio.Queue = asyncio.Queue()
+    for u in users:
+        await work_q.put(_WorkItem(user=u, tried=frozenset()))
 
     totals = BroadcastTotals()
     for sn in session_names:
-        totals.by_session[sn] = (0, 0, 0, 0, 0)
+        totals.by_session[sn] = (0, 0, 0, 0, 0, 0)
 
     totals_lock = asyncio.Lock()
     log_lock = asyncio.Lock()
     prog_lock = asyncio.Lock()
+    state_lock = asyncio.Lock()
+    pending_lock = asyncio.Lock()
+    pending = len(users)
+    retired: set[str] = set()
+    peer_floods: dict[str, int] = {}
     total_tasks = len(users)
 
     async def _log(msg: str) -> None:
@@ -163,6 +190,7 @@ async def run_dm_broadcast(
         skipped: int = 0,
         privacy: int = 0,
         dailycap: int = 0,
+        relay: int = 0,
     ) -> None:
         async with totals_lock:
             totals.sent += sent
@@ -170,29 +198,118 @@ async def run_dm_broadcast(
             totals.skipped += skipped
             totals.privacy_skipped += privacy
             totals.deferred_daily_cap += dailycap
-            s, f, sk, pr, dc = totals.by_session[sn]
+            totals.relay_exhausted += relay
+            s, f, sk, pr, dc, rx = totals.by_session[sn]
             totals.by_session[sn] = (
                 s + sent,
                 f + failed,
                 sk + skipped,
                 pr + privacy,
                 dc + dailycap,
+                rx + relay,
             )
 
-    async def _worker(
+    async def _eligible_sessions(tried: frozenset[str]) -> list[str]:
+        async with state_lock:
+            return [s for s in session_names if s not in tried and s not in retired]
+
+    async def _finalize_user(progress: Progress, task_id: int) -> None:
+        nonlocal pending
+        shutdown = False
+        async with pending_lock:
+            pending -= 1
+            if pending == 0:
+                shutdown = True
+        await _bump_task(progress, task_id)
+        if shutdown:
+            for _ in range(n_acc):
+                await work_q.put(_SHUTDOWN)
+
+    async def _relay_exhausted_log(
         session_name: str,
-        chunk: list[dict],
+        u: dict,
+        preview: str,
+        *,
+        detail: str = "",
+    ) -> None:
+        msg = (
+            f"  [red]relay_exhausted[/] [dim]{escape(session_name)}[/] {escape(preview)}"
+            + (f" — {detail}" if detail else "")
+        )
+        await _log(msg)
+        await _add_totals(session_name, failed=1, relay=1)
+
+    async def _try_requeue(
+        u: dict,
+        tried: frozenset[str],
+        session_name: str,
+        preview: str,
         progress: Progress,
         task_id: int,
+    ) -> bool:
+        """True если вернули в очередь; False если финал relay_exhausted (уже учтён)."""
+        new_tried = frozenset(tried | {session_name})
+        if len(new_tried) >= max_attempts:
+            await _relay_exhausted_log(
+                session_name, u, preview, detail="лимит аккаунтов на получателя"
+            )
+            await _finalize_user(progress, task_id)
+            return False
+        elig = await _eligible_sessions(new_tried)
+        if not elig:
+            await _relay_exhausted_log(
+                session_name, u, preview, detail="нет доступных аккаунтов"
+            )
+            await _finalize_user(progress, task_id)
+            return False
+        await work_q.put(_WorkItem(user=u, tried=new_tried))
+        return True
+
+    async def _record_peer_flood_and_maybe_retire(session_name: str) -> bool:
+        """True если сессию вывели из прогона (retired)."""
+        async with state_lock:
+            peer_floods[session_name] = peer_floods.get(session_name, 0) + 1
+            n = peer_floods[session_name]
+            if n >= retire_after:
+                retired.add(session_name)
+                return True
+        return False
+
+    async def _degraded_relay_loop(
+        session_name: str, progress: Progress, task_id: int
     ) -> None:
-        if not chunk:
-            return
+        """
+        Нет рабочего клиента — перекладываем задачи живым воркерам.
+        Если доступных аккаунтов не осталось — финализируем получателя (relay_exhausted).
+        """
+        while True:
+            item = await work_q.get()
+            if item is _SHUTDOWN:
+                break
+            assert isinstance(item, _WorkItem)
+            u, tried = item.user, item.tried
+            elig = await _eligible_sessions(tried)
+            if not elig:
+                ident = u.get("username") or u.get("telegram_id") or "?"
+                preview = str(ident)[:40]
+                await _relay_exhausted_log(
+                    session_name,
+                    u,
+                    preview,
+                    detail="нет рабочих аккаунтов для relay",
+                )
+                await _finalize_user(progress, task_id)
+            else:
+                await work_q.put(item)
+                await asyncio.sleep(random.uniform(0.02, 0.08))
+
+    async def _worker(session_name: str, progress: Progress, task_id: int) -> None:
         client = pool.get_client(session_name, settings=settings)
         if not client:
             await _log(f"[red]{escape(session_name)}[/]: нет клиента (api_id/api_hash)")
-            for _ in chunk:
-                await _add_totals(session_name, failed=1)
-                await _bump_task(progress, task_id)
+            async with state_lock:
+                retired.add(session_name)
+            await _degraded_relay_loop(session_name, progress, task_id)
             return
 
         try:
@@ -203,24 +320,87 @@ async def run_dm_broadcast(
                     f"[red]{escape(session_name)}[/]: подключение — {escape(_err_tag(e))}: "
                     f"{escape(str(e)[:80])}"
                 )
-                for _ in chunk:
-                    await _add_totals(session_name, failed=1)
-                    await _bump_task(progress, task_id)
+                async with state_lock:
+                    retired.add(session_name)
+                await _degraded_relay_loop(session_name, progress, task_id)
                 return
 
             if not await client.is_user_authorized():
                 await _log(f"[red]{escape(session_name)}[/]: сессия не авторизована")
-                for _ in chunk:
-                    await _add_totals(session_name, failed=1)
-                    await _bump_task(progress, task_id)
+                async with state_lock:
+                    retired.add(session_name)
+                await _degraded_relay_loop(session_name, progress, task_id)
                 return
 
-            for local_i, u in enumerate(chunk):
+            cached_handles: tuple[object, object, object] | None
+            if settings.broadcast_precache_media_to_saved:
+                try:
+                    cached_handles = await precache_campaign_images(client, images)
+                    await _log(
+                        f"  [dim]precache[/] [dim]{escape(session_name)}[/]: "
+                        "медиа 1–3.jpg закэшировано (Избранное)"
+                    )
+                except Exception as e:
+                    await _log(
+                        f"  [yellow]precache[/] [dim]{escape(session_name)}[/]: "
+                        f"{escape(_err_tag(e))}: {_err_detail(e)} — отправка с диска"
+                    )
+                    cached_handles = None
+            else:
+                cached_handles = None
+
+            while True:
+                item = await work_q.get()
+                if item is _SHUTDOWN:
+                    break
+                assert isinstance(item, _WorkItem)
+                u, tried = item.user, item.tried
+
+                async with state_lock:
+                    sn_retired = session_name in retired
+                if sn_retired:
+                    elig = await _eligible_sessions(tried)
+                    if not elig:
+                        ident = u.get("username") or u.get("telegram_id") or "?"
+                        preview = str(ident)[:40]
+                        await _relay_exhausted_log(
+                            session_name,
+                            u,
+                            preview,
+                            detail="сессия в retire, других аккаунтов нет",
+                        )
+                        await _finalize_user(progress, task_id)
+                    else:
+                        await work_q.put(item)
+                        await asyncio.sleep(random.uniform(0.02, 0.08))
+                    continue
+
+                if session_name in tried:
+                    await work_q.put(item)
+                    await asyncio.sleep(random.uniform(0.02, 0.08))
+                    continue
+
+                elig = await _eligible_sessions(tried)
+                if not elig:
+                    ident = u.get("username") or u.get("telegram_id") or "?"
+                    preview = str(ident)[:40]
+                    await _relay_exhausted_log(
+                        session_name, u, preview, detail="очередь пуста по аккаунтам"
+                    )
+                    await _finalize_user(progress, task_id)
+                    continue
+
+                if session_name not in elig:
+                    await work_q.put(item)
+                    await asyncio.sleep(random.uniform(0.02, 0.08))
+                    continue
+
                 uid = u.get("id")
-                raw_caption = texts[local_i % 2]
+                h = _user_stable_hash(u)
+                raw_caption = texts[h % 2]
                 caption = apply_caption_homoglyph(raw_caption, settings)
-                img_path = images[local_i % 3]
-                ident = (u.get("username") or u.get("telegram_id") or "?")
+                img_path = images[h % 3]
+                ident = u.get("username") or u.get("telegram_id") or "?"
                 preview = str(ident)[:40]
 
                 if daily_limit > 0:
@@ -228,17 +408,10 @@ async def run_dm_broadcast(
                     if n_today >= daily_limit:
                         await _log(
                             f"  [yellow]daily_cap[/] [dim]{escape(session_name)}[/] "
-                            f"{escape(preview)} — лимит {daily_limit}/сутки UTC"
+                            f"{escape(preview)} — лимит {daily_limit}/сутки UTC → relay"
                         )
                         await _add_totals(session_name, dailycap=1)
-                        await _bump_task(progress, task_id)
-                        if local_i + 1 < len(chunk):
-                            await asyncio.sleep(
-                                smart_delay(
-                                    settings.delay_broadcast_min,
-                                    settings.delay_broadcast_max,
-                                )
-                            )
+                        await _try_requeue(u, tried, session_name, preview, progress, task_id)
                         continue
 
                 async def _try_send() -> None:
@@ -248,8 +421,14 @@ async def run_dm_broadcast(
                             f"  [yellow]skip[/] [dim]{escape(session_name)}[/] @{escape(preview)} — нет peer"
                         )
                         await _add_totals(session_name, skipped=1)
+                        await _finalize_user(progress, task_id)
                         return
-                    await client.send_file(peer, img_path, caption=caption)
+                    media = (
+                        cached_handles[h % 3]
+                        if cached_handles is not None
+                        else img_path
+                    )
+                    await client.send_file(peer, media, caption=caption)
                     if uid is not None:
                         await db.mark_broadcast_sent(int(uid))
                         await db.increment_broadcast_sent_today_utc(session_name)
@@ -258,6 +437,7 @@ async def run_dm_broadcast(
                         f"  [green]OK[/] [dim]{escape(session_name)}[/] → [white]{escape(preview)}[/]"
                     )
                     await _add_totals(session_name, sent=1)
+                    await _finalize_user(progress, task_id)
 
                 try:
                     await _try_send()
@@ -268,10 +448,13 @@ async def run_dm_broadcast(
                         await _try_send()
                     except Exception as e2:
                         await _log(
-                            f"  [red]FAIL[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
-                            f"{escape(_err_tag(e2))}: {_err_detail(e2)}"
+                            f"  [yellow]relay[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
+                            f"FloodWait повтор: {escape(_err_tag(e2))}: {_err_detail(e2)}"
                         )
-                        await _add_totals(session_name, failed=1)
+                        await _try_requeue(
+                            u, tried, session_name, preview, progress, task_id
+                        )
+                        continue
                 except PeerFloodError as e:
                     pool.mark_flood_wait(session_name, _PEER_FLOOD_COOLDOWN_SEC)
                     await _log(
@@ -283,16 +466,35 @@ async def run_dm_broadcast(
                         await _try_send()
                     except PeerFloodError as e2:
                         await _log(
-                            f"  [red]FAIL[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
-                            f"PeerFloodError (повтор): {_err_detail(e2)}"
+                            f"  [yellow]relay[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
+                            f"PeerFlood после повтора: {_err_detail(e2)}"
                         )
-                        await _add_totals(session_name, failed=1)
+                        if await _record_peer_flood_and_maybe_retire(session_name):
+                            await _log(
+                                f"  [yellow]retire[/] [dim]{escape(session_name)}[/] "
+                                f"после {retire_after} PeerFlood в прогоне"
+                            )
+                        await _try_requeue(
+                            u, tried, session_name, preview, progress, task_id
+                        )
+                        async with state_lock:
+                            must_exit = session_name in retired
+                        if must_exit:
+                            try:
+                                await client.disconnect()
+                            except Exception:
+                                pass
+                            return
+                        continue
                     except Exception as e2:
                         await _log(
-                            f"  [red]FAIL[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
+                            f"  [yellow]relay[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
                             f"{escape(_err_tag(e2))}: {_err_detail(e2)}"
                         )
-                        await _add_totals(session_name, failed=1)
+                        await _try_requeue(
+                            u, tried, session_name, preview, progress, task_id
+                        )
+                        continue
                 except UserPrivacyRestrictedError:
                     if uid is not None:
                         await db.mark_broadcast_privacy_blocked(int(uid))
@@ -301,6 +503,7 @@ async def run_dm_broadcast(
                         "приватность; в очередь для повтора"
                     )
                     await _add_totals(session_name, privacy=1)
+                    await _finalize_user(progress, task_id)
                 except (
                     UserIsBlockedError,
                     PeerIdInvalidError,
@@ -314,30 +517,36 @@ async def run_dm_broadcast(
                         f"{escape(_err_tag(e))}: {_err_detail(e)}"
                     )
                     await _add_totals(session_name, skipped=1)
+                    await _finalize_user(progress, task_id)
                 except ValueError as e:
                     await _log(
                         f"  [yellow]skip[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
                         f"ValueError: {_err_detail(e)}"
                     )
                     await _add_totals(session_name, skipped=1)
+                    await _finalize_user(progress, task_id)
                 except RPCError as e:
                     await _log(
-                        f"  [red]FAIL[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
-                        f"{escape(_err_tag(e))}: {_err_detail(e)}"
+                        f"  [yellow]relay[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
+                        f"RPCError: {_err_detail(e)}"
                     )
-                    await _add_totals(session_name, failed=1)
+                    await _try_requeue(
+                        u, tried, session_name, preview, progress, task_id
+                    )
+                    continue
                 except Exception as e:
                     await _log(
-                        f"  [red]FAIL[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
+                        f"  [yellow]relay[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
                         f"{escape(_err_tag(e))}: {_err_detail(e)}"
                     )
-                    await _add_totals(session_name, failed=1)
+                    await _try_requeue(
+                        u, tried, session_name, preview, progress, task_id
+                    )
+                    continue
 
-                await _bump_task(progress, task_id)
-
-                if local_i + 1 < len(chunk):
-                    delay = smart_delay(settings.delay_broadcast_min, settings.delay_broadcast_max)
-                    await asyncio.sleep(delay)
+                await asyncio.sleep(
+                    smart_delay(settings.delay_broadcast_min, settings.delay_broadcast_max)
+                )
         finally:
             try:
                 await client.disconnect()
@@ -357,16 +566,39 @@ async def run_dm_broadcast(
             "[cyan]Рассылка[/]",
             total=total_tasks,
         )
+        precache_on = settings.broadcast_precache_media_to_saved
         await _log(
             f"[bold]Старт рассылки[/] ([dim]{escape(mode_label)}[/]): аккаунтов [white]{n_acc}[/], "
             f"получателей [white]{len(users)}[/], лимит/акк/сутки UTC: [white]{daily_limit or '—'}[/], "
+            f"relay max акк/получатель: [white]{max_attempts}[/], "
+            f"retire после PeerFlood: [white]{retire_after}[/], "
+            f"precache медиа: [white]{precache_on}[/], "
             f"прокси: [white]{is_proxy_enabled()}[/]"
         )
         await asyncio.gather(
-            *(
-                _worker(session_names[i], chunks[i], progress, task_id)
-                for i in range(n_acc)
-            )
+            *(_worker(session_names[i], progress, task_id) for i in range(n_acc))
         )
+
+        drained = 0
+        while True:
+            try:
+                left = work_q.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if left is _SHUTDOWN:
+                continue
+            assert isinstance(left, _WorkItem)
+            u, tried = left.user, left.tried
+            ident = u.get("username") or u.get("telegram_id") or "?"
+            preview = str(ident)[:40]
+            sn0 = session_names[0] if session_names else "?"
+            await _relay_exhausted_log(
+                sn0, u, preview, detail="прервано (drain очереди)"
+            )
+            await _finalize_user(progress, task_id)
+            drained += 1
+
+        if drained:
+            await _log(f"[yellow]Очередь очищена после воркеров:[/] {drained} шт.")
 
     return totals
