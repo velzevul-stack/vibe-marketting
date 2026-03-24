@@ -47,10 +47,10 @@ from src.telethon_username_resolve import (
 
 BroadcastMode = Literal["normal", "privacy_retry"]
 
-_PEER_FLOOD_COOLDOWN_SEC = 120
 _DISCONNECT_RECONNECT_ATTEMPTS = 3
 _SHUTDOWN = object()
 # max(секунды от Telegram, ступень): 1.5h → 3h → 6h → 12h → 24h → 48h (дальше последняя).
+# PeerFlood — только ступени лестницы (per-session счётчик peer_flood_round), без секунд из RPC.
 _BROADCAST_FLOOD_LADDER_SEC: tuple[int, ...] = (
     5400,
     10800,
@@ -231,6 +231,7 @@ async def run_dm_broadcast(
     retired: set[str] = set()
     peer_floods: dict[str, int] = {}
     flood_round: dict[str, int] = {}
+    peer_flood_round: dict[str, int] = {}
     total_tasks = len(users)
     session_connect_locks: dict[str, asyncio.Lock] = {}
     account_status: dict[str, str] = {sn: "ожидание старта" for sn in session_names}
@@ -246,6 +247,13 @@ async def run_dm_broadcast(
             flood_round[sn] = idx + 1
         tg = flood_wait_seconds(exc)
         return max(tg, _broadcast_flood_floor_for_index(idx))
+
+    async def _next_peer_flood_wait_seconds(sn: str) -> tuple[int, int]:
+        """Ступень лестницы для PeerFlood; возвращает (секунды, номер раунда 1-based)."""
+        async with state_lock:
+            idx = peer_flood_round.get(sn, 0)
+            peer_flood_round[sn] = idx + 1
+        return _broadcast_flood_floor_for_index(idx), idx + 1
 
     def _session_connect_lock(session_name: str) -> asyncio.Lock:
         key = str(telethon_session_file(session_name, settings).resolve())
@@ -603,12 +611,24 @@ async def run_dm_broadcast(
                     Возврат: exit_worker — выйти из воркера; continue_outer — след. получатель;
                     done — отправка после паузы успешна.
                     """
-                    pool.mark_flood_wait(session_name, _PEER_FLOOD_COOLDOWN_SEC)
+                    sec, pf_rnd = await _next_peer_flood_wait_seconds(session_name)
+                    pool.mark_flood_wait(session_name, sec)
+                    await _set_worker_status(
+                        session_name,
+                        f"PeerFlood {sec // 60}м ({sec}s)",
+                    )
                     await _log(
                         f"  [yellow]peer_flood[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
-                        f"пауза {_PEER_FLOOD_COOLDOWN_SEC}s, повтор… {_err_detail(e)}"
+                        f"ожидание [bold]{sec}[/] с [dim](лестница, раунд {pf_rnd})[/], повтор… "
+                        f"{_err_detail(e)}"
                     )
-                    await asyncio.sleep(_PEER_FLOOD_COOLDOWN_SEC)
+                    await sleep_flood_wait(
+                        sec,
+                        console=console,
+                        session_label=session_name,
+                        prefix="PeerFlood",
+                    )
+                    await _set_worker_status(session_name, "активно")
                     try:
                         await _try_send_resilient()
                         return "done"
@@ -840,6 +860,7 @@ async def run_dm_broadcast(
             f"получателей [white]{len(users)}[/], лимит/акк/сутки UTC: [white]{daily_limit or '—'}[/], "
             f"relay max акк/получатель: [white]{max_attempts}[/], "
             f"retire после PeerFlood: [white]{retire_after}[/], "
+            f"[dim]PeerFlood — пауза по той же лестнице, что FloodWait (без секунд из RPC)[/], "
             f"{media_part}, "
             f"прокси: [white]{is_proxy_enabled()}[/]"
         )
