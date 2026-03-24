@@ -44,7 +44,12 @@ from src.config import (
     wipe_telethon_session_files,
 )
 from src.account_zip_import import import_sessions_zip, print_zip_import_report
-from src.broadcast.bundle import load_campaign_bundle, validate_campaign_bundle
+from src.broadcast.bundle import (
+    discover_campaign_import_slices,
+    load_campaign_bundle,
+    validate_campaign_bundle,
+    validate_extra_import_slices,
+)
 from src.broadcast.runner import run_dm_broadcast
 from src.groups_txt_io import export_groups_to_txt, import_txt_to_found_groups, load_found_groups_list
 from src.db import get_db
@@ -547,9 +552,9 @@ def _run_broadcast_from_bundle_menu() -> None:
     console.print()
     console.print("[bold white]── Рассылка из пакета ──[/]")
     console.print(
-        "[dim]В одном каталоге-пакете:[/] [cyan]accounts.zip[/], [cyan]apis.txt[/] [dim](api_id:api_hash)[/], "
-        "[cyan]proxies.txt[/] [dim](рядом с apis: строки[/] [cyan]host:port:user:pass[/] [dim]→ http автоматически; или URL)[/], "
-        "[cyan]text_1.txt[/], [cyan]text_2.txt[/]; [cyan]1.jpg–3.jpg[/] [dim]— если ниже выберете «да» на фото[/]"
+        "[dim]В одном каталоге-пакете:[/] [cyan]accounts.zip[/], [cyan]apis.txt[/], [cyan]proxies.txt[/], "
+        "тексты и jpg; [dim]опционально рядом[/] [cyan]accounts2.zip[/] + [cyan]apis2.txt[/] + [cyan]proxies2.txt[/] "
+        "[dim](и accounts3… — только своим ZIP)[/]"
     )
     sett = Settings()
     default_dir = _PROJECT_ROOT / sett.campaign_dir
@@ -559,7 +564,9 @@ def _run_broadcast_from_bundle_menu() -> None:
     root = Path(raw).expanduser()
     bundle = load_campaign_bundle(root)
     send_media = Confirm.ask("Прикладывать фото к сообщениям (1.jpg–3.jpg)?", default=True)
+    slices = discover_campaign_import_slices(root)
     errs = validate_campaign_bundle(bundle, require_images=send_media)
+    errs.extend(validate_extra_import_slices(slices))
     if errs:
         console.print("[red]Пакет не готов:[/]")
         for e in errs:
@@ -568,45 +575,79 @@ def _run_broadcast_from_bundle_menu() -> None:
         return
     console.print("[green]Пакет проверен.[/]")
 
-    if Confirm.ask("Импортировать accounts.zip в каталог сессий?", default=True):
+    stems_by_label: dict[str, frozenset[str]] = {}
+
+    if Confirm.ask("Импортировать ZIP сессий (все accounts.zip, accounts2.zip…) в каталог сессий?", default=True):
         mode = "overwrite" if Confirm.ask("Перезаписать совпадающие файлы на диске?", default=False) else "skip"
-        try:
-            rep = import_sessions_zip(bundle.zip_path, on_conflict=mode, settings=sett)
-            print_zip_import_report(console, rep)
-        except (OSError, zipfile.BadZipFile) as e:
-            console.print(f"[red]Ошибка ZIP: {escape(str(e))}[/]")
+        for sl in slices:
+            if not sl.zip_path.is_file():
+                console.print(f"[dim]Нет {escape(sl.zip_path.name)} — пропуск.[/]")
+                stems_by_label[sl.label] = frozenset()
+                continue
+            try:
+                rep = import_sessions_zip(sl.zip_path, on_conflict=mode, settings=sett)
+                console.print(f"[bold]{escape(sl.label)}[/] — {escape(sl.zip_path.name)}")
+                print_zip_import_report(console, rep)
+                stems_by_label[sl.label] = frozenset(rep.imported_stems)
+            except (OSError, zipfile.BadZipFile) as e:
+                console.print(f"[red]Ошибка ZIP {escape(sl.zip_path.name)}: {escape(str(e))}[/]")
+                Prompt.ask("\n[dim]Enter — назад[/]", default="")
+                return
+    else:
+        for sl in slices:
+            stems_by_label[sl.label] = frozenset()
+
+    for sl in slices:
+        if not sl.zip_path.is_file():
+            continue
+        api_pairs = load_api_pairs_from_file(sl.apis_file)
+        if not api_pairs:
+            console.print(f"[red]В {escape(sl.apis_file.name)} нет валидных пар api_id:api_hash.[/]")
+            Prompt.ask("\n[dim]Enter — назад[/]", default="")
+            return
+        proxy_lines = load_proxy_pool_from_file(sl.proxies_file)
+        if not proxy_lines:
+            console.print(f"[red]В {escape(sl.proxies_file.name)} нет валидных строк прокси.[/]")
             Prompt.ask("\n[dim]Enter — назад[/]", default="")
             return
 
-    api_pairs = load_api_pairs_from_file(bundle.apis_file)
-    if not api_pairs:
-        console.print("[red]В apis.txt пакета нет валидных пар api_id:api_hash.[/]")
-        Prompt.ask("\n[dim]Enter — назад[/]", default="")
-        return
-
-    if Confirm.ask("Назначить API из apis.txt на аккаунты (round-robin)?", default=True):
-        ok_api, msg_api = assign_apis_round_robin_to_accounts(api_pairs, sett)
-        if ok_api:
-            console.print(f"[green]API назначены:[/] [dim]{escape(msg_api)}[/]")
-        else:
-            console.print(f"[red]{escape(msg_api)}[/]")
-            Prompt.ask("\n[dim]Enter — назад[/]", default="")
-            return
-
-    proxy_lines = load_proxy_pool_from_file(bundle.proxies_file)
-    if not proxy_lines:
-        console.print("[red]В proxies.txt пакета нет валидных строк прокси.[/]")
-        Prompt.ask("\n[dim]Enter — назад[/]", default="")
-        return
-
-    if Confirm.ask("Назначить прокси из пакета на аккаунты (round-robin)?", default=True):
-        ok, msg = assign_proxies_round_robin_to_accounts(sett, proxy_pool=proxy_lines)
-        if ok:
-            console.print(f"[green]Прокси назначены:[/] [dim]{escape(msg)}[/]")
-        else:
-            console.print(f"[red]{escape(msg)}[/]")
-            Prompt.ask("\n[dim]Enter — назад[/]", default="")
-            return
+    if Confirm.ask("Назначить API и прокси по слайсам (только сессии из соответствующего ZIP)?", default=True):
+        for sl in slices:
+            if not sl.zip_path.is_file():
+                continue
+            api_pairs = load_api_pairs_from_file(sl.apis_file)
+            proxy_lines = load_proxy_pool_from_file(sl.proxies_file)
+            stems = stems_by_label.get(sl.label, frozenset())
+            if stems:
+                ok_api, msg_api = assign_apis_round_robin_to_accounts(
+                    api_pairs, sett, only_session_names=stems
+                )
+            elif sl.label == "accounts":
+                ok_api, msg_api = assign_apis_round_robin_to_accounts(api_pairs, sett)
+            else:
+                console.print(
+                    f"[yellow]{escape(sl.label)}: нет стемов после импорта — "
+                    "пропуск API/прокси (импортируйте ZIP или используйте CLI).[/]"
+                )
+                continue
+            if not ok_api:
+                console.print(f"[red]{escape(msg_api)}[/]")
+                Prompt.ask("\n[dim]Enter — назад[/]", default="")
+                return
+            console.print(f"[green]API ({escape(sl.label)}):[/] [dim]{escape(msg_api)}[/]")
+            if stems:
+                ok, msg = assign_proxies_round_robin_to_accounts(
+                    sett, proxy_pool=proxy_lines, only_session_names=stems
+                )
+            elif sl.label == "accounts":
+                ok, msg = assign_proxies_round_robin_to_accounts(sett, proxy_pool=proxy_lines)
+            else:
+                continue
+            if not ok:
+                console.print(f"[red]{escape(msg)}[/]")
+                Prompt.ask("\n[dim]Enter — назад[/]", default="")
+                return
+            console.print(f"[green]Прокси ({escape(sl.label)}):[/] [dim]{escape(msg)}[/]")
 
     if not load_accounts():
         console.print("[red]Нет аккаунтов в accounts.json после импорта.[/]")

@@ -78,7 +78,12 @@ def _cli_broadcast(
     from rich.console import Console
 
     from src.account_zip_import import import_sessions_zip, print_zip_import_report
-    from src.broadcast.bundle import load_campaign_bundle, validate_campaign_bundle
+    from src.broadcast.bundle import (
+        discover_campaign_import_slices,
+        load_campaign_bundle,
+        validate_campaign_bundle,
+        validate_extra_import_slices,
+    )
     from src.broadcast.runner import run_dm_broadcast
     from src.config import (
         Settings,
@@ -92,32 +97,69 @@ def _cli_broadcast(
     con = Console()
     root = Path(dir_path).expanduser().resolve()
     bundle = load_campaign_bundle(root)
+    slices = discover_campaign_import_slices(root)
     errs = validate_campaign_bundle(bundle, require_images=send_media)
+    errs.extend(validate_extra_import_slices(slices))
     if errs:
         for e in errs:
             con.print(f"[red]{e}[/]")
         return 1
 
     sett = Settings()
-    try:
-        rep = import_sessions_zip(bundle.zip_path, on_conflict=zip_conflict, settings=sett)
+
+    def _apply_slice(sl) -> int:
+        if not sl.zip_path.is_file():
+            con.print(f"[yellow]Пропуск слайса {sl.label}: нет {sl.zip_path.name}[/]")
+            return 0
+        try:
+            rep = import_sessions_zip(sl.zip_path, on_conflict=zip_conflict, settings=sett)
+        except (OSError, zipfile.BadZipFile) as e:
+            con.print(f"[red]ZIP {sl.zip_path.name}: {e}[/]")
+            return 1
+        con.print(f"[bold]{sl.label}[/] — {sl.zip_path.name}")
         print_zip_import_report(con, rep)
-    except (OSError, zipfile.BadZipFile) as e:
-        con.print(f"[red]ZIP: {e}[/]")
-        return 1
+        stems = frozenset(rep.imported_stems)
+        api_pairs = load_api_pairs_from_file(sl.apis_file)
+        if not api_pairs:
+            con.print(f"[red]В {sl.apis_file.name} нет валидных пар api_id:api_hash.[/]")
+            return 1
+        if stems:
+            ok_api, msg_api = assign_apis_round_robin_to_accounts(
+                api_pairs, sett, only_session_names=stems
+            )
+        elif sl.label == "accounts":
+            ok_api, msg_api = assign_apis_round_robin_to_accounts(api_pairs, sett)
+        else:
+            con.print(
+                f"[yellow]{sl.label}: в ZIP не скопировано новых сессий — API/прокси для этого слайса не трогаем.[/]"
+            )
+            return 0
+        if not ok_api:
+            con.print(f"[red]{msg_api}[/]")
+            return 1
+        con.print(f"[dim]API ({sl.label}):[/] {msg_api}")
 
-    api_pairs = load_api_pairs_from_file(bundle.apis_file)
-    ok_api, msg_api = assign_apis_round_robin_to_accounts(api_pairs, sett)
-    if not ok_api:
-        con.print(f"[red]{msg_api}[/]")
-        return 1
-    con.print(f"[dim]API назначены:[/] {msg_api}")
+        proxies = load_proxy_pool_from_file(sl.proxies_file)
+        if not proxies:
+            con.print(f"[red]В {sl.proxies_file.name} нет валидных прокси.[/]")
+            return 1
+        if stems:
+            ok_px, msg_px = assign_proxies_round_robin_to_accounts(
+                sett, proxy_pool=proxies, only_session_names=stems
+            )
+        elif sl.label == "accounts":
+            ok_px, msg_px = assign_proxies_round_robin_to_accounts(sett, proxy_pool=proxies)
+        else:
+            return 0
+        if not ok_px:
+            con.print(f"[red]{msg_px}[/]")
+            return 1
+        con.print(f"[dim]Прокси ({sl.label}):[/] {msg_px}")
+        return 0
 
-    proxies = load_proxy_pool_from_file(bundle.proxies_file)
-    ok, msg = assign_proxies_round_robin_to_accounts(sett, proxy_pool=proxies)
-    if not ok:
-        con.print(f"[red]{msg}[/]")
-        return 1
+    for sl in slices:
+        if _apply_slice(sl):
+            return 1
 
     cat_val = None if category == "all" else category
     mode = "privacy_retry" if broadcast_mode == "privacy_retry" else "normal"

@@ -246,29 +246,56 @@ def bundle_round_robin_account_rows(all_rows: list[dict]) -> list[dict]:
 def assign_proxies_round_robin_to_accounts(
     settings: Settings | None = None,
     proxy_pool: list[str] | None = None,
+    *,
+    only_session_names: frozenset[str] | None = None,
 ) -> tuple[bool, str]:
     """
     Назначить прокси из пула аккаунтам (round-robin).
     Если передан ``proxy_pool``, используется он; иначе пул из config (proxies.txt / settings).
-    Сохраняет весь accounts.json (включая служебные строки), не только список аккаунтов.
-    Дополнительно: если есть ``sessions/<имя>.json``, в него пишется то же поле ``proxy``.
+    ``only_session_names`` — обновлять только эти session_name (мульти-пакет accounts2/apis2/proxies2).
+
+    Аккаунты с историей успешной рассылки (SQLite account_broadcast_daily) не меняют proxy/sidecar.
     """
+    from src.db.database import session_names_with_any_broadcast_sent
+
     s = settings or Settings()
     proxies = proxy_pool if proxy_pool is not None else load_proxy_pool_from_config()
     if not proxies:
         return False, "Нет прокси в пуле (proxies.txt / settings.json)"
     all_rows = load_accounts_all()
     targets = bundle_round_robin_account_rows(all_rows)
-    if not targets:
+    if only_session_names is not None:
+        only_session_names = frozenset(x.strip() for x in only_session_names if x and str(x).strip())
+        targets = [
+            acc
+            for acc in targets
+            if (acc.get("session_name") or "").strip() in only_session_names
+        ]
+        if not targets:
+            return False, "Нет аккаунтов в указанном наборе session_name для назначения прокси"
+    elif not targets:
         return False, "Нет аккаунтов (session_name) в accounts.json"
-    for i, acc in enumerate(targets):
-        p = proxies[i % len(proxies)]
+    frozen = session_names_with_any_broadcast_sent()
+    skipped_frozen = 0
+    j = 0
+    for acc in targets:
+        name = (acc.get("session_name") or "").strip()
+        if name and name in frozen:
+            skipped_frozen += 1
+            continue
+        p = proxies[j % len(proxies)]
+        j += 1
         acc["proxy"] = p
-        name = acc.get("session_name")
         if name:
-            write_proxy_to_session_sidecar(str(name), p, s)
+            write_proxy_to_session_sidecar(name, p, s)
     save_accounts_all(all_rows)
-    return True, str(accounts_json_path())
+    msg = str(accounts_json_path())
+    parts = []
+    if skipped_frozen:
+        parts.append(f"без смены прокси у {skipped_frozen} акк. с историей рассылки")
+    if parts:
+        msg += " (" + "; ".join(parts) + ")"
+    return True, msg
 
 
 def load_json(path: Path) -> dict | list:
@@ -1117,17 +1144,29 @@ def load_api_pairs_from_file(path: Path) -> list[tuple[int, str]]:
 def assign_apis_round_robin_to_accounts(
     api_pairs: list[tuple[int, str]],
     settings: Settings | None = None,
+    *,
+    only_session_names: frozenset[str] | None = None,
 ) -> tuple[bool, str]:
     """
     Назначить api_id/api_hash из списка парам аккаунтам (round-robin).
     Обновляет accounts.json и при наличии sidecar ``sessions/<name>.json``.
+    ``only_session_names`` — только эти session_name (мульти-пакет).
     """
     if not api_pairs:
         return False, "Пустой список api (apis.txt)"
     s = settings or Settings()
     all_rows = load_accounts_all()
     targets = bundle_round_robin_account_rows(all_rows)
-    if not targets:
+    if only_session_names is not None:
+        only_session_names = frozenset(x.strip() for x in only_session_names if x and str(x).strip())
+        targets = [
+            acc
+            for acc in targets
+            if (acc.get("session_name") or "").strip() in only_session_names
+        ]
+        if not targets:
+            return False, "Нет аккаунтов в указанном наборе session_name для назначения API"
+    elif not targets:
         return False, "Нет аккаунтов (session_name) в accounts.json"
     for i, acc in enumerate(targets):
         aid, ahash = api_pairs[i % len(api_pairs)]

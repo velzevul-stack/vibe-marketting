@@ -24,6 +24,8 @@ class ZipImportReport:
     session_files_after: int = 0
     accounts_with_api: int = 0
     sessions_on_disk_without_api_row: int = 0
+    # Стемы пар .json+.session, реально скопированные в этот прогон (не skip).
+    imported_stems: list[str] = field(default_factory=list)
 
 
 def _collect_pairs_from_dir(root: Path) -> tuple[dict[str, Path], dict[str, Path]]:
@@ -99,6 +101,7 @@ def import_sessions_zip(
             shutil.copy2(src_s, dst_s)
             shutil.copy2(src_j, dst_j)
             report.pairs_copied += 1
+            report.imported_stems.append(stem)
 
     report.sync_added, report.sync_warnings = sync_sessions_dir_to_accounts(s)
     report.session_files_after = len(list(dest_dir.glob("*.session")))

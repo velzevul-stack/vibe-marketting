@@ -1,6 +1,7 @@
 """Пакет рассылки: каталог с zip сессий, apis.txt, proxies.txt, текстами и картинками."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +25,88 @@ class CampaignBundle:
     @property
     def image_paths(self) -> tuple[Path, Path, Path]:
         return (self.image_1, self.image_2, self.image_3)
+
+
+@dataclass(frozen=True)
+class CampaignImportSlice:
+    """Один ZIP + соответствующие apis/proxies (базовый accounts.zip или accounts2.zip + apis2.txt + proxies2.txt)."""
+
+    label: str
+    zip_path: Path
+    apis_file: Path
+    proxies_file: Path
+
+
+def discover_campaign_import_slices(root: Path) -> list[CampaignImportSlice]:
+    """
+    Сначала базовый accounts.zip + apis.txt + proxies.txt, затем все accountsN.zip по возрастанию N
+    с парами apisN.txt / proxiesN.txt.
+    """
+    r = Path(root).expanduser().resolve()
+    out: list[CampaignImportSlice] = [
+        CampaignImportSlice(
+            label="accounts",
+            zip_path=r / "accounts.zip",
+            apis_file=r / "apis.txt",
+            proxies_file=r / "proxies.txt",
+        )
+    ]
+    found: list[tuple[int, Path]] = []
+    for p in r.glob("accounts*.zip"):
+        m = re.match(r"(?i)^accounts(\d+)\.zip$", p.name)
+        if not m:
+            continue
+        n = int(m.group(1))
+        found.append((n, p))
+    found.sort(key=lambda x: x[0])
+    for n, zp in found:
+        out.append(
+            CampaignImportSlice(
+                label=f"accounts{n}",
+                zip_path=zp,
+                apis_file=r / f"apis{n}.txt",
+                proxies_file=r / f"proxies{n}.txt",
+            )
+        )
+    return out
+
+
+def validate_import_slice_apis_proxies(sl: CampaignImportSlice) -> list[str]:
+    """Проверка apis/proxies для слайса (zip считается уже существующим)."""
+    errs: list[str] = []
+    if not sl.apis_file.is_file():
+        errs.append(f"Нет {sl.apis_file.name} для {sl.zip_path.name} в {sl.zip_path.parent}")
+    else:
+        n_api = 0
+        for raw in sl.apis_file.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or ":" not in line:
+                continue
+            left, right = line.split(":", 1)
+            if left.strip().isdigit() and right.strip():
+                n_api += 1
+        if n_api < 1:
+            errs.append(f"{sl.apis_file.name}: нет ни одной валидной пары api_id:api_hash")
+    if not sl.proxies_file.is_file():
+        errs.append(f"Нет {sl.proxies_file.name} для {sl.zip_path.name}")
+    else:
+        pool = load_proxy_pool_from_file(sl.proxies_file)
+        if not pool:
+            errs.append(
+                f"{sl.proxies_file.name}: нет валидных строк прокси "
+                f"(host:port:user:pass или URL socks5/http)"
+            )
+    return errs
+
+
+def validate_extra_import_slices(slices: list[CampaignImportSlice]) -> list[str]:
+    """Доп. пакеты accounts2.zip…: если ZIP есть — обязательны apisN и proxiesN."""
+    errs: list[str] = []
+    for sl in slices[1:]:
+        if not sl.zip_path.is_file():
+            continue
+        errs.extend(validate_import_slice_apis_proxies(sl))
+    return errs
 
 
 def load_campaign_bundle(root: Path, zip_name: str = "accounts.zip") -> CampaignBundle:

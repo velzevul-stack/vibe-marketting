@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import random
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Literal
 
 from rich.console import Console
+from rich.live import Live
 from rich.markup import escape
 from rich.progress import (
     BarColumn,
@@ -16,6 +18,7 @@ from rich.progress import (
     TextColumn,
     TimeElapsedColumn,
 )
+from rich.table import Table
 from telethon import TelegramClient
 from telethon.errors import (
     FloodWaitError,
@@ -47,6 +50,20 @@ BroadcastMode = Literal["normal", "privacy_retry"]
 _PEER_FLOOD_COOLDOWN_SEC = 120
 _DISCONNECT_RECONNECT_ATTEMPTS = 3
 _SHUTDOWN = object()
+# max(секунды от Telegram, ступень): 1.5h → 3h → 6h → 12h → 24h → 48h (дальше последняя).
+_BROADCAST_FLOOD_LADDER_SEC: tuple[int, ...] = (
+    5400,
+    10800,
+    21600,
+    43200,
+    86400,
+    172800,
+)
+
+
+def _broadcast_flood_floor_for_index(idx: int) -> int:
+    i = min(max(0, idx), len(_BROADCAST_FLOOD_LADDER_SEC) - 1)
+    return int(_BROADCAST_FLOOD_LADDER_SEC[i])
 
 
 class _DegradedExit(BaseException):
@@ -213,8 +230,22 @@ async def run_dm_broadcast(
     pending = len(users)
     retired: set[str] = set()
     peer_floods: dict[str, int] = {}
+    flood_round: dict[str, int] = {}
     total_tasks = len(users)
     session_connect_locks: dict[str, asyncio.Lock] = {}
+    account_status: dict[str, str] = {sn: "ожидание старта" for sn in session_names}
+    status_lock = asyncio.Lock()
+
+    async def _set_worker_status(sn: str, msg: str) -> None:
+        async with status_lock:
+            account_status[sn] = msg
+
+    async def _next_broadcast_flood_wait_seconds(sn: str, exc: BaseException) -> int:
+        async with state_lock:
+            idx = flood_round.get(sn, 0)
+            flood_round[sn] = idx + 1
+        tg = flood_wait_seconds(exc)
+        return max(tg, _broadcast_flood_floor_for_index(idx))
 
     def _session_connect_lock(session_name: str) -> asyncio.Lock:
         key = str(telethon_session_file(session_name, settings).resolve())
@@ -359,6 +390,7 @@ async def run_dm_broadcast(
         client = pool.get_client(session_name, settings=settings)
         if not client:
             await _log(f"[red]{escape(session_name)}[/]: нет клиента (api_id/api_hash)")
+            await _set_worker_status(session_name, "нет api, degraded")
             async with state_lock:
                 retired.add(session_name)
             await _degraded_relay_loop(session_name, progress, task_id)
@@ -367,6 +399,7 @@ async def run_dm_broadcast(
         try:
             try:
                 await asyncio.sleep(worker_index * 0.1 + random.uniform(0, 0.08))
+                await _set_worker_status(session_name, "подключение…")
                 async with _session_connect_lock(session_name):
                     await client.connect()
             except Exception as e:
@@ -374,6 +407,7 @@ async def run_dm_broadcast(
                     f"[red]{escape(session_name)}[/]: подключение — {escape(_err_tag(e))}: "
                     f"{escape(str(e)[:80])}"
                 )
+                await _set_worker_status(session_name, "ошибка подключения")
                 async with state_lock:
                     retired.add(session_name)
                 await _degraded_relay_loop(session_name, progress, task_id)
@@ -381,6 +415,7 @@ async def run_dm_broadcast(
 
             if not await client.is_user_authorized():
                 await _log(f"[red]{escape(session_name)}[/]: сессия не авторизована")
+                await _set_worker_status(session_name, "не авторизован")
                 async with state_lock:
                     retired.add(session_name)
                 await _degraded_relay_loop(session_name, progress, task_id)
@@ -388,6 +423,7 @@ async def run_dm_broadcast(
 
             cached_handles: tuple[object, object, object] | None = None
             if send_media and settings.broadcast_precache_media_to_saved:
+                await _set_worker_status(session_name, "precache медиа…")
                 try:
                     cached_handles, _precache_from_disk = await precache_campaign_images(
                         client,
@@ -415,8 +451,10 @@ async def run_dm_broadcast(
                 cached_handles = None
 
             while True:
+                await _set_worker_status(session_name, "ожидание задачи")
                 item = await work_q.get()
                 if item is _SHUTDOWN:
+                    await _set_worker_status(session_name, "стоп")
                     break
                 assert isinstance(item, _WorkItem)
                 u, tried = item.user, item.tried
@@ -511,6 +549,7 @@ async def run_dm_broadcast(
                         "переподключение исчерпано — retire, ожидание конца рассылки "
                         "[dim](очередь на другие аккаунты)[/]"
                     )
+                    await _set_worker_status(session_name, "disconnect → degraded")
                     async with state_lock:
                         retired.add(session_name)
                     await _try_requeue(
@@ -592,6 +631,7 @@ async def run_dm_broadcast(
                                     await client.disconnect()
                                 except Exception:
                                     pass
+                                await _set_worker_status(session_name, "retired (PeerFlood)")
                                 return "exit_worker"
                         return "continue_outer"
                     except Exception as e2:
@@ -616,28 +656,38 @@ async def run_dm_broadcast(
 
                 try:
                     try:
+                        await _set_worker_status(session_name, "отправка…")
                         await _try_send_resilient()
                     except FloodWaitError as e_first:
                         e_fw = e_first
                         send_ok = False
                         flood_peer_continue = False
                         for _fw_round in range(50):
-                            sec = flood_wait_seconds(e_fw)
+                            sec = await _next_broadcast_flood_wait_seconds(
+                                session_name, e_fw
+                            )
                             if sec <= 0:
+                                await _set_worker_status(session_name, "активно")
                                 await _log(
                                     f"  [yellow]FloodWait[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
                                     "сервер не вернул длительность, relay"
                                 )
                                 break
                             pool.mark_flood_wait(session_name, sec)
+                            await _set_worker_status(
+                                session_name,
+                                f"FloodWait {sec // 60}м ({sec}s)",
+                            )
                             await _log(
                                 f"  [yellow]FloodWait[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
-                                f"ожидание [bold]{sec}[/] с полностью [dim](раунд {_fw_round + 1})[/]"
+                                f"ожидание [bold]{sec}[/] с [dim](max TG/лестница, раунд {_fw_round + 1})[/]"
                             )
                             await sleep_flood_wait(
                                 sec, console=console, session_label=session_name
                             )
+                            await _set_worker_status(session_name, "активно")
                             try:
+                                await _set_worker_status(session_name, "отправка…")
                                 await _try_send_resilient()
                                 send_ok = True
                                 break
@@ -793,12 +843,47 @@ async def run_dm_broadcast(
             f"{media_part}, "
             f"прокси: [white]{is_proxy_enabled()}[/]"
         )
-        await asyncio.gather(
-            *(
-                _worker(session_names[i], progress, task_id, worker_index=i)
-                for i in range(n_acc)
+        await _log("[dim]Ниже таблица статусов аккаунтов обновляется ~1 с.[/]")
+
+        stop_live = asyncio.Event()
+
+        async def _live_status_loop() -> None:
+            live = Live(console=console, refresh_per_second=1.2)
+            live.start()
+            try:
+                while not stop_live.is_set():
+                    async with status_lock:
+                        snap = sorted(account_status.items(), key=lambda x: x[0])
+                    tab = Table(
+                        title="[bold cyan]Аккаунты[/] — рассылка",
+                        show_lines=False,
+                        header_style="bold",
+                    )
+                    tab.add_column("Сессия", max_width=20, overflow="ellipsis")
+                    tab.add_column("Статус", max_width=44, overflow="ellipsis")
+                    for sn, st in snap:
+                        tab.add_row(escape(str(sn)[:18]), escape(str(st)[:42]))
+                    live.update(tab)
+                    try:
+                        await asyncio.wait_for(stop_live.wait(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        pass
+            finally:
+                live.stop()
+
+        live_task = asyncio.create_task(_live_status_loop())
+        try:
+            await asyncio.gather(
+                *(
+                    _worker(session_names[i], progress, task_id, worker_index=i)
+                    for i in range(n_acc)
+                )
             )
-        )
+        finally:
+            stop_live.set()
+            live_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await live_task
 
         drained = 0
         while True:

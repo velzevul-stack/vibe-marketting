@@ -1,5 +1,6 @@
 """SQLite база данных."""
 import json
+import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -425,6 +426,29 @@ class Database:
             cursor = await db.execute(sql, tuple(params))
             rows = await cursor.fetchall()
             return [dict(r) for r in rows]
+
+
+def session_names_with_any_broadcast_sent(db_path: str | Path | None = None) -> frozenset[str]:
+    """
+    Синхронно: session_name, с которых уже была успешная рассылка (account_broadcast_daily.sent > 0).
+    Таким аккаунтам не меняют прокси при round-robin — риск AuthKeyDuplicatedError при смене IP.
+    """
+    path = Path(db_path or Path(__file__).parent.parent.parent / "output" / "vibe_marketing.db")
+    if not path.is_file():
+        return frozenset()
+    conn = sqlite3.connect(str(path), timeout=15.0)
+    try:
+        cur = conn.execute(
+            "SELECT DISTINCT session_name FROM account_broadcast_daily "
+            "WHERE COALESCE(sent, 0) > 0"
+        )
+        return frozenset(
+            str(row[0]).strip()
+            for row in cur.fetchall()
+            if row[0] and str(row[0]).strip()
+        )
+    finally:
+        conn.close()
 
 
 _db: Database | None = None
