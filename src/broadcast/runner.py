@@ -41,7 +41,12 @@ from src.invite.manager import AccountPool, smart_delay
 BroadcastMode = Literal["normal", "privacy_retry"]
 
 _PEER_FLOOD_COOLDOWN_SEC = 120
+_DISCONNECT_RECONNECT_ATTEMPTS = 3
 _SHUTDOWN = object()
+
+
+class _DegradedExit(BaseException):
+    """Не Exception: воркер ушёл в degraded до конца рассылки (не ловить как relay)."""
 
 
 def _err_tag(exc: BaseException) -> str:
@@ -61,6 +66,25 @@ def _user_stable_hash(u: dict) -> int:
         except (TypeError, ValueError):
             pass
     return hash(str(u.get("telegram_id") or u.get("username") or ""))
+
+
+def _is_telethon_disconnected_error(exc: BaseException) -> bool:
+    """Клиент Telethon отвалился (нельзя слать запросы)."""
+    if isinstance(
+        exc,
+        (
+            BrokenPipeError,
+            ConnectionResetError,
+            ConnectionAbortedError,
+            ConnectionError,
+        ),
+    ):
+        return True
+    msg = str(exc).lower()
+    return (
+        "cannot send requests while disconnected" in msg
+        or ("disconnected" in msg and "send" in msg)
+    )
 
 
 def _is_username_missing_telegram_error(exc: BaseException) -> bool:
@@ -468,6 +492,46 @@ async def run_dm_broadcast(
                         await _try_requeue(u, tried, session_name, preview, progress, task_id)
                         continue
 
+                async def _reconnect_client_3x(reason: str) -> bool:
+                    for attempt in range(1, _DISCONNECT_RECONNECT_ATTEMPTS + 1):
+                        await _log(
+                            f"  [yellow]reconnect[/] [dim]{escape(session_name)}[/] "
+                            f"{attempt}/{_DISCONNECT_RECONNECT_ATTEMPTS} [dim]{escape(reason[:72])}[/]"
+                        )
+                        try:
+                            async with _session_connect_lock(session_name):
+                                try:
+                                    await client.disconnect()
+                                except Exception:
+                                    pass
+                                await client.connect()
+                            if await client.is_user_authorized():
+                                await _log(
+                                    f"  [green]reconnect OK[/] [dim]{escape(session_name)}[/]"
+                                )
+                                return True
+                        except Exception as ex:
+                            await _log(
+                                f"  [dim]reconnect fail[/] [dim]{escape(session_name)}[/]: "
+                                f"{escape(_err_tag(ex))}: {escape(str(ex)[:100])}"
+                            )
+                        await asyncio.sleep(0.4 * attempt)
+                    return False
+
+                async def _enter_degraded_after_disconnect(_reason: str) -> None:
+                    await _log(
+                        f"  [red]disconnect[/] [dim]{escape(session_name)}[/]: "
+                        "переподключение исчерпано — retire, ожидание конца рассылки "
+                        "[dim](очередь на другие аккаунты)[/]"
+                    )
+                    async with state_lock:
+                        retired.add(session_name)
+                    await _try_requeue(
+                        u, tried, session_name, preview, progress, task_id
+                    )
+                    await _degraded_relay_loop(session_name, progress, task_id)
+                    raise _DegradedExit
+
                 async def _try_send() -> None:
                     peer = await _resolve_peer(client, u)
                     if peer is None:
@@ -497,6 +561,17 @@ async def run_dm_broadcast(
                     await _add_totals(session_name, sent=1)
                     await _finalize_user(progress, task_id)
 
+                async def _try_send_resilient() -> None:
+                    while True:
+                        try:
+                            await _try_send()
+                            return
+                        except (ConnectionError, OSError) as e:
+                            if not _is_telethon_disconnected_error(e):
+                                raise
+                            if not await _reconnect_client_3x(str(e)[:120]):
+                                await _enter_degraded_after_disconnect(str(e)[:120])
+
                 async def _peer_flood_after(e: PeerFloodError) -> str:
                     """
                     Возврат: exit_worker — выйти из воркера; continue_outer — след. получатель;
@@ -509,7 +584,7 @@ async def run_dm_broadcast(
                     )
                     await asyncio.sleep(_PEER_FLOOD_COOLDOWN_SEC)
                     try:
-                        await _try_send()
+                        await _try_send_resilient()
                         return "done"
                     except PeerFloodError as e2:
                         await _log(
@@ -553,144 +628,147 @@ async def run_dm_broadcast(
                         return "continue_outer"
 
                 try:
-                    await _try_send()
-                except FloodWaitError as e_first:
-                    e_fw = e_first
-                    send_ok = False
-                    flood_peer_continue = False
-                    for _fw_round in range(50):
-                        sec = flood_wait_seconds(e_fw)
-                        if sec <= 0:
+                    try:
+                        await _try_send_resilient()
+                    except FloodWaitError as e_first:
+                        e_fw = e_first
+                        send_ok = False
+                        flood_peer_continue = False
+                        for _fw_round in range(50):
+                            sec = flood_wait_seconds(e_fw)
+                            if sec <= 0:
+                                await _log(
+                                    f"  [yellow]FloodWait[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
+                                    "сервер не вернул длительность, relay"
+                                )
+                                break
+                            pool.mark_flood_wait(session_name, sec)
                             await _log(
                                 f"  [yellow]FloodWait[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
-                                "сервер не вернул длительность, relay"
+                                f"ожидание [bold]{sec}[/] с полностью [dim](раунд {_fw_round + 1})[/]"
                             )
-                            break
-                        pool.mark_flood_wait(session_name, sec)
-                        await _log(
-                            f"  [yellow]FloodWait[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
-                            f"ожидание [bold]{sec}[/] с полностью [dim](раунд {_fw_round + 1})[/]"
-                        )
-                        await sleep_flood_wait(
-                            sec, console=console, session_label=session_name
-                        )
-                        try:
-                            await _try_send()
-                            send_ok = True
-                            break
-                        except FloodWaitError as e_again:
-                            e_fw = e_again
-                            continue
-                        except PeerFloodError as e_pf:
-                            pr = await _peer_flood_after(e_pf)
-                            if pr == "exit_worker":
-                                return
-                            if pr == "continue_outer":
-                                flood_peer_continue = True
+                            await sleep_flood_wait(
+                                sec, console=console, session_label=session_name
+                            )
+                            try:
+                                await _try_send_resilient()
+                                send_ok = True
                                 break
-                            send_ok = True
-                            break
-                    if flood_peer_continue:
-                        continue
-                    if not send_ok:
+                            except FloodWaitError as e_again:
+                                e_fw = e_again
+                                continue
+                            except PeerFloodError as e_pf:
+                                pr = await _peer_flood_after(e_pf)
+                                if pr == "exit_worker":
+                                    return
+                                if pr == "continue_outer":
+                                    flood_peer_continue = True
+                                    break
+                                send_ok = True
+                                break
+                        if flood_peer_continue:
+                            continue
+                        if not send_ok:
+                            await _log(
+                                f"  [yellow]relay[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
+                                "FloodWait после ожиданий"
+                            )
+                            await _try_requeue(
+                                u, tried, session_name, preview, progress, task_id
+                            )
+                            continue
+                    except PeerFloodError as e:
+                        pr = await _peer_flood_after(e)
+                        if pr == "exit_worker":
+                            return
+                        if pr == "continue_outer":
+                            continue
+                    except UserPrivacyRestrictedError:
+                        if uid is not None:
+                            await db.mark_broadcast_privacy_blocked(int(uid))
                         await _log(
-                            f"  [yellow]relay[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
-                            "FloodWait после ожиданий"
+                            f"  [yellow]privacy[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
+                            "приватность; в очередь для повтора"
                         )
-                        await _try_requeue(
-                            u, tried, session_name, preview, progress, task_id
-                        )
-                        continue
-                except PeerFloodError as e:
-                    pr = await _peer_flood_after(e)
-                    if pr == "exit_worker":
-                        return
-                    if pr == "continue_outer":
-                        continue
-                except UserPrivacyRestrictedError:
-                    if uid is not None:
-                        await db.mark_broadcast_privacy_blocked(int(uid))
-                    await _log(
-                        f"  [yellow]privacy[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
-                        "приватность; в очередь для повтора"
-                    )
-                    await _add_totals(session_name, privacy=1)
-                    await _finalize_user(progress, task_id)
-                except (UsernameNotOccupiedError, UsernameInvalidError) as e:
-                    if uid is not None:
-                        await db.mark_username_not_found(int(uid))
-                        await _add_totals(session_name, skipped=1, username_nf=1)
-                    else:
-                        await _add_totals(session_name, skipped=1)
-                    await _log(
-                        f"  [yellow]skip[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
-                        f"нет @username в Telegram [dim](в БД помечен)[/]: "
-                        f"{escape(_err_tag(e))}: {_err_detail(e)}"
-                    )
-                    await _finalize_user(progress, task_id)
-                except (
-                    UserIsBlockedError,
-                    PeerIdInvalidError,
-                    InputUserDeactivatedError,
-                    UserIdInvalidError,
-                ) as e:
-                    await _log(
-                        f"  [yellow]skip[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
-                        f"{escape(_err_tag(e))}: {_err_detail(e)}"
-                    )
-                    await _add_totals(session_name, skipped=1)
-                    await _finalize_user(progress, task_id)
-                except ValueError as e:
-                    un_m = (
-                        uid is not None and _is_username_missing_telegram_error(e)
-                    )
-                    if un_m:
-                        await db.mark_username_not_found(int(uid))
-                    await _log(
-                        f"  [yellow]skip[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
-                        f"ValueError: {_err_detail(e)}"
-                        + (" [dim](в БД помечен как нет @username)[/]" if un_m else "")
-                    )
-                    await _add_totals(
-                        session_name, skipped=1, username_nf=1 if un_m else 0
-                    )
-                    await _finalize_user(progress, task_id)
-                except RPCError as e:
-                    if uid is not None and _is_username_missing_telegram_error(e):
-                        await db.mark_username_not_found(int(uid))
+                        await _add_totals(session_name, privacy=1)
+                        await _finalize_user(progress, task_id)
+                    except (UsernameNotOccupiedError, UsernameInvalidError) as e:
+                        if uid is not None:
+                            await db.mark_username_not_found(int(uid))
+                            await _add_totals(session_name, skipped=1, username_nf=1)
+                        else:
+                            await _add_totals(session_name, skipped=1)
                         await _log(
                             f"  [yellow]skip[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
-                            f"нет @username (RPC), в БД помечен: {_err_detail(e)}"
-                        )
-                        await _add_totals(session_name, skipped=1, username_nf=1)
-                        await _finalize_user(progress, task_id)
-                    else:
-                        await _log(
-                            f"  [yellow]relay[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
-                            f"RPCError: {_err_detail(e)}"
-                        )
-                        await _try_requeue(
-                            u, tried, session_name, preview, progress, task_id
-                        )
-                        continue
-                except Exception as e:
-                    if uid is not None and _is_username_missing_telegram_error(e):
-                        await db.mark_username_not_found(int(uid))
-                        await _log(
-                            f"  [yellow]skip[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
-                            f"нет @username, в БД помечен: {escape(_err_tag(e))}: {_err_detail(e)}"
-                        )
-                        await _add_totals(session_name, skipped=1, username_nf=1)
-                        await _finalize_user(progress, task_id)
-                    else:
-                        await _log(
-                            f"  [yellow]relay[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
+                            f"нет @username в Telegram [dim](в БД помечен)[/]: "
                             f"{escape(_err_tag(e))}: {_err_detail(e)}"
                         )
-                        await _try_requeue(
-                            u, tried, session_name, preview, progress, task_id
+                        await _finalize_user(progress, task_id)
+                    except (
+                        UserIsBlockedError,
+                        PeerIdInvalidError,
+                        InputUserDeactivatedError,
+                        UserIdInvalidError,
+                    ) as e:
+                        await _log(
+                            f"  [yellow]skip[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
+                            f"{escape(_err_tag(e))}: {_err_detail(e)}"
                         )
-                        continue
+                        await _add_totals(session_name, skipped=1)
+                        await _finalize_user(progress, task_id)
+                    except ValueError as e:
+                        un_m = (
+                            uid is not None and _is_username_missing_telegram_error(e)
+                        )
+                        if un_m:
+                            await db.mark_username_not_found(int(uid))
+                        await _log(
+                            f"  [yellow]skip[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
+                            f"ValueError: {_err_detail(e)}"
+                            + (" [dim](в БД помечен как нет @username)[/]" if un_m else "")
+                        )
+                        await _add_totals(
+                            session_name, skipped=1, username_nf=1 if un_m else 0
+                        )
+                        await _finalize_user(progress, task_id)
+                    except RPCError as e:
+                        if uid is not None and _is_username_missing_telegram_error(e):
+                            await db.mark_username_not_found(int(uid))
+                            await _log(
+                                f"  [yellow]skip[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
+                                f"нет @username (RPC), в БД помечен: {_err_detail(e)}"
+                            )
+                            await _add_totals(session_name, skipped=1, username_nf=1)
+                            await _finalize_user(progress, task_id)
+                        else:
+                            await _log(
+                                f"  [yellow]relay[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
+                                f"RPCError: {_err_detail(e)}"
+                            )
+                            await _try_requeue(
+                                u, tried, session_name, preview, progress, task_id
+                            )
+                            continue
+                    except Exception as e:
+                        if uid is not None and _is_username_missing_telegram_error(e):
+                            await db.mark_username_not_found(int(uid))
+                            await _log(
+                                f"  [yellow]skip[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
+                                f"нет @username, в БД помечен: {escape(_err_tag(e))}: {_err_detail(e)}"
+                            )
+                            await _add_totals(session_name, skipped=1, username_nf=1)
+                            await _finalize_user(progress, task_id)
+                        else:
+                            await _log(
+                                f"  [yellow]relay[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
+                                f"{escape(_err_tag(e))}: {_err_detail(e)}"
+                            )
+                            await _try_requeue(
+                                u, tried, session_name, preview, progress, task_id
+                            )
+                            continue
+                except _DegradedExit:
+                    return
 
                 await asyncio.sleep(
                     smart_delay(settings.delay_broadcast_min, settings.delay_broadcast_max)
