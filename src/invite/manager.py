@@ -25,6 +25,7 @@ from src.config import (
     telethon_session_file,
 )
 from src.telethon_flood_wait import flood_wait_seconds, sleep_flood_wait
+from src.telethon_username_resolve import get_entity_username_try_at_prefix
 
 
 @dataclass
@@ -516,7 +517,7 @@ class InviteManager:
                     if uid and str(uid).isdigit():
                         ent = await client.get_entity(int(uid))
                     elif uname:
-                        ent = await client.get_entity(uname)
+                        ent = await get_entity_username_try_at_prefix(client, uname)
                     else:
                         continue
                     entities.append(ent)

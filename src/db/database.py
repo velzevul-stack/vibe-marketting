@@ -242,6 +242,34 @@ class Database:
             )
             await db.commit()
 
+    async def count_username_not_found(self) -> int:
+        """Строки с меткой «username не найден в Telegram»."""
+        async with self._connect() as db:
+            cur = await db.execute(
+                "SELECT COUNT(*) FROM users WHERE username_not_found_at IS NOT NULL "
+                "AND username_not_found_at != ''"
+            )
+            row = await cur.fetchone()
+            return int(row[0]) if row else 0
+
+    async def clear_username_not_found_all(self) -> int:
+        """Снять метку username_not_found_at у всех записей. Возвращает число обновлённых строк."""
+        async with self._connect() as db:
+            cur = await db.execute(
+                "SELECT COUNT(*) FROM users WHERE username_not_found_at IS NOT NULL "
+                "AND username_not_found_at != ''"
+            )
+            row = await cur.fetchone()
+            n = int(row[0]) if row else 0
+            if n == 0:
+                return 0
+            await db.execute(
+                "UPDATE users SET username_not_found_at = NULL "
+                "WHERE username_not_found_at IS NOT NULL AND username_not_found_at != ''"
+            )
+            await db.commit()
+            return n
+
     async def count_privacy_queue(
         self,
         username_contains: str | None = None,

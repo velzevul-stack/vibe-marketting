@@ -1580,6 +1580,31 @@ async def _run_browse_users_db() -> None:
     db = get_db()
     with console_loading(console, "Загрузка…"):
         await db.init()
+    console.print(f"{_mk('1')} Поиск и просмотр по username")
+    console.print(
+        f"{_mk('2')} Сбросить метку «username не найден в Telegram» "
+        "[dim](все записи с username_not_found_at)[/]"
+    )
+    sub_hub = Prompt.ask("Действие", choices=["1", "2"], default="1")
+    if sub_hub == "2":
+        n_marked = await db.count_username_not_found()
+        if n_marked == 0:
+            console.print("[dim]Нет записей с этой меткой.[/]")
+            Prompt.ask("\n[dim]Нажмите Enter…[/]", default="")
+            return
+        console.print(f"[dim]Записей с меткой:[/] [bold]{n_marked}[/]")
+        if not Confirm.ask(
+            "Сбросить метку у всех этих строк? Они снова попадут в рассылку и в выборку контактов "
+            "(если совпадают категория и прочие фильтры).",
+            default=False,
+        ):
+            Prompt.ask("\n[dim]Нажмите Enter…[/]", default="")
+            return
+        cleared = await db.clear_username_not_found_all()
+        console.print(f"[green]Сброшено меток:[/] [bold]{cleared}[/]")
+        Prompt.ask("\n[dim]Нажмите Enter…[/]", default="")
+        return
+
     cat = Prompt.ask("Категория", choices=["all", "hot", "warm"], default="all")
     list_mode = Prompt.ask(
         "Кого показывать",
@@ -1676,6 +1701,7 @@ async def _run_stats() -> None:
         await db.init()
         hot, warm = await db.count_users()
         privacy_queue_n = await db.count_privacy_queue()
+        username_nf_n = await db.count_username_not_found()
 
     # Найденные группы
     found_groups_path = Path("output") / "found_groups.json"
@@ -1705,6 +1731,7 @@ async def _run_stats() -> None:
     table.add_row("", "")
     table.add_row("[bold]Рассылка[/]", "")
     table.add_row("  Очередь privacy (не доставлено)", str(privacy_queue_n))
+    table.add_row("  Метка «username не найден в TG»", str(username_nf_n))
     console.print(table)
     Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
 

@@ -37,6 +37,10 @@ from src.config import Settings, load_accounts, is_proxy_enabled, telethon_sessi
 from src.telethon_flood_wait import flood_wait_seconds, sleep_flood_wait
 from src.db.database import Database
 from src.invite.manager import AccountPool, smart_delay
+from src.telethon_username_resolve import (
+    get_entity_username_try_at_prefix,
+    is_username_missing_telegram_error,
+)
 
 BroadcastMode = Literal["normal", "privacy_retry"]
 
@@ -87,40 +91,23 @@ def _is_telethon_disconnected_error(exc: BaseException) -> bool:
     )
 
 
-def _is_username_missing_telegram_error(exc: BaseException) -> bool:
-    """Нет такого @username в Telegram (No user has…, UsernameNotOccupied и т.д.)."""
-    if isinstance(exc, (UsernameNotOccupiedError, UsernameInvalidError)):
-        return True
-    es = (str(exc) or "").lower()
-    if not es:
-        return False
-    needles = (
-        "no user has",
-        "nobody is using",
-        "cannot find any entity",
-        "username is not occupied",
-        "username invalid",
-    )
-    return any(n in es for n in needles)
-
-
 async def _resolve_peer(client: TelegramClient, u: dict):
     """
     Сначала по числовому telegram_id; при любой ошибке резолва — fallback на username
     (часто в БД лежит битый/чужой id, а @username валиден).
     """
-    un = (u.get("username") or "").strip().lstrip("@")
+    un_raw = (u.get("username") or "").strip()
     tid_s = str(u.get("telegram_id") or "").strip()
 
     if tid_s.isdigit():
         try:
             return await client.get_entity(int(tid_s))
         except Exception:
-            if un:
-                return await client.get_entity(un)
+            if un_raw:
+                return await get_entity_username_try_at_prefix(client, un_raw)
             raise
-    if un:
-        return await client.get_entity(un)
+    if un_raw:
+        return await get_entity_username_try_at_prefix(client, un_raw)
     return None
 
 
@@ -608,7 +595,7 @@ async def run_dm_broadcast(
                                 return "exit_worker"
                         return "continue_outer"
                     except Exception as e2:
-                        if uid is not None and _is_username_missing_telegram_error(e2):
+                        if uid is not None and is_username_missing_telegram_error(e2):
                             await db.mark_username_not_found(int(uid))
                             await _log(
                                 f"  [yellow]skip[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
@@ -718,7 +705,7 @@ async def run_dm_broadcast(
                         await _finalize_user(progress, task_id)
                     except ValueError as e:
                         un_m = (
-                            uid is not None and _is_username_missing_telegram_error(e)
+                            uid is not None and is_username_missing_telegram_error(e)
                         )
                         if un_m:
                             await db.mark_username_not_found(int(uid))
@@ -732,7 +719,7 @@ async def run_dm_broadcast(
                         )
                         await _finalize_user(progress, task_id)
                     except RPCError as e:
-                        if uid is not None and _is_username_missing_telegram_error(e):
+                        if uid is not None and is_username_missing_telegram_error(e):
                             await db.mark_username_not_found(int(uid))
                             await _log(
                                 f"  [yellow]skip[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
@@ -750,7 +737,7 @@ async def run_dm_broadcast(
                             )
                             continue
                     except Exception as e:
-                        if uid is not None and _is_username_missing_telegram_error(e):
+                        if uid is not None and is_username_missing_telegram_error(e):
                             await db.mark_username_not_found(int(uid))
                             await _log(
                                 f"  [yellow]skip[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
