@@ -18,11 +18,42 @@ from src.config import (
     is_placeholder_proxy_url,
     load_accounts,
     load_session_bind_specs_from_file,
+    normalize_proxy_line,
     proxy_url_to_telethon,
     session_bind_file_path,
     telethon_session_dir_path,
     upsert_telethon_account,
 )
+
+
+_PROXY_ASK = (
+    "Прокси (опционально): http(s)://…, socks5://… или host:port:user:pass "
+    "[dim](напр. 103.59.40.117:8000:user:pass)[/]"
+)
+
+
+def _parse_proxy_for_account(console, raw: str | None) -> str | None:
+    """
+    Ввод из консоли → URL для accounts.json и Telethon.
+    Строка host:port:user:pass → http://user:pass@host:port (как в proxies.txt).
+    """
+    if raw is None:
+        return None
+    s = strip_c0_controls(str(raw).strip())
+    if not s:
+        return None
+    if is_placeholder_proxy_url(s):
+        return None
+    n = normalize_proxy_line(s)
+    if n and "://" in n:
+        return n
+    if "://" in s:
+        return s.strip()
+    console.print(
+        "[yellow]Прокси не распознан.[/] Нужны: [dim]URL (http://, socks5://) "
+        "или host:port:user:pass[/]"
+    )
+    return None
 
 
 def _session_dir_label() -> str:
@@ -82,14 +113,12 @@ async def offer_ephemeral_scrape_proxy_reconfigure(
 
     raw = strip_c0_controls(
         Prompt.ask(
-            "Прокси URL (socks5:// или http://), пусто — без прокси",
+            f"{_PROXY_ASK}, пусто — без прокси",
             default="",
             console=console,
         ).strip()
     )
-    new_proxy: str | None = None
-    if raw and not is_placeholder_proxy_url(raw):
-        new_proxy = raw
+    new_proxy = _parse_proxy_for_account(console, raw or None)
 
     try:
         await client.disconnect()
@@ -303,7 +332,8 @@ async def _new_login_console(console) -> None:
             pass
         return
 
-    proxy = strip_c0_controls(Prompt.ask("Прокси URL (опционально)", default="").strip()) or None
+    proxy_raw = strip_c0_controls(Prompt.ask(_PROXY_ASK, default="").strip())
+    proxy = _parse_proxy_for_account(console, proxy_raw or None)
     if Confirm.ask("Записать аккаунт в accounts.json?", default=True):
         _append_account(session_name, api_id, api_hash, phone=phone, proxy=proxy)
         console.print(f"[green]Сохранено в {accounts_json_path()}[/]")
@@ -472,10 +502,9 @@ async def login_client_for_one_off_scrape(console):
     proxy_url = None
     if prompt_yes_no(console, "Использовать прокси для Telegram (этот сбор)?", default=False):
         raw = strip_c0_controls(
-            Prompt.ask("Прокси URL (socks5:// или http://)", default="", console=console).strip()
+            Prompt.ask(_PROXY_ASK, default="", console=console).strip()
         )
-        if raw and not is_placeholder_proxy_url(raw):
-            proxy_url = raw
+        proxy_url = _parse_proxy_for_account(console, raw or None)
 
     session_name = _unique_session_stem_from_phone(phone)
     console.print(
