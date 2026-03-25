@@ -1179,6 +1179,40 @@ def assign_apis_round_robin_to_accounts(
     return True, str(accounts_json_path())
 
 
+def assign_apis_fill_missing_in_accounts(
+    api_pairs: list[tuple[int, str]],
+    settings: Settings | None = None,
+) -> tuple[bool, str, int]:
+    """
+    Назначить api_id/api_hash только строкам с ``session_name``, у которых нет полного набора ключей
+    (как у отдельного входа ``tg_*``, не попавшего в ``only_session_names`` при назначении по ZIP).
+    Round-robin по ``api_pairs``; sidecar обновляется. Уже заполненные ключи не меняются.
+    """
+    if not api_pairs:
+        return False, "Пустой список api (apis.txt)", 0
+    s = settings or Settings()
+    all_rows = load_accounts_all()
+    targets = [
+        acc
+        for acc in all_rows
+        if isinstance(acc, dict)
+        and not acc.get("_template")
+        and (acc.get("session_name") or "").strip()
+        and not is_telethon_account_row(acc)
+    ]
+    if not targets:
+        return True, str(accounts_json_path()), 0
+    for i, acc in enumerate(targets):
+        aid, ahash = api_pairs[i % len(api_pairs)]
+        acc["api_id"] = int(aid)
+        acc["api_hash"] = str(ahash).strip()
+        name = acc.get("session_name")
+        if name:
+            write_api_to_session_sidecar(str(name), aid, ahash, s)
+    save_accounts_all(all_rows)
+    return True, str(accounts_json_path()), len(targets)
+
+
 def strip_api_credentials_from_accounts(
     settings: Settings | None = None,
 ) -> tuple[int, int, str]:

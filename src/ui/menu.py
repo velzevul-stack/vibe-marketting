@@ -20,6 +20,7 @@ from rich.prompt import Prompt, Confirm
 from src.config import (
     Settings,
     accounts_json_path,
+    assign_apis_fill_missing_in_accounts,
     assign_apis_round_robin_to_accounts,
     assign_proxies_round_robin_to_accounts,
     bundle_round_robin_account_rows,
@@ -648,6 +649,21 @@ def _run_broadcast_from_bundle_menu() -> None:
                 Prompt.ask("\n[dim]Enter — назад[/]", default="")
                 return
             console.print(f"[green]Прокси ({escape(sl.label)}):[/] [dim]{escape(msg)}[/]")
+
+    combined_api: list[tuple[int, str]] = []
+    for sl in slices:
+        if sl.zip_path.is_file():
+            combined_api.extend(load_api_pairs_from_file(sl.apis_file))
+    if combined_api:
+        ok_fill, _msg_fill, n_fill = assign_apis_fill_missing_in_accounts(combined_api, sett)
+        if ok_fill and n_fill:
+            console.print(
+                f"[green]API из пакета дописан[/] [dim]аккаунтам без api_id/api_hash:[/] "
+                f"[white]{n_fill}[/] [dim](часто[/] [cyan]tg_*[/] [dim]после отдельного входа — "
+                f"раньше назначение шло только по стемам из ZIP)[/]"
+            )
+        elif not ok_fill:
+            console.print(f"[yellow]{escape(_msg_fill)}[/]")
 
     console.print()
     console.print("[bold white]── Аккаунты для рассылки ──[/]")
