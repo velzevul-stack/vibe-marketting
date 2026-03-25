@@ -79,6 +79,28 @@ def _err_detail(exc: BaseException, limit: int = 120) -> str:
     return escape(s[:limit])
 
 
+async def _connect_telethon_sqlite_resilient(client: TelegramClient) -> None:
+    """Повтор при ``database is locked`` у SQLite внутри ``*.session`` (Windows / конкуренция)."""
+    last: BaseException | None = None
+    for attempt in range(1, 26):
+        try:
+            await client.connect()
+            return
+        except Exception as e:
+            last = e
+            msg = (str(e) or "").lower()
+            tname = type(e).__name__.lower()
+            locked = "database is locked" in msg or (
+                "locked" in msg and "operational" in tname
+            )
+            if locked and attempt < 25:
+                await asyncio.sleep(min(3.0, 0.15 * (attempt**1.35)))
+                continue
+            raise
+    if last is not None:
+        raise last
+
+
 def _user_stable_hash(u: dict) -> int:
     uid = u.get("id")
     if uid is not None:
@@ -446,7 +468,7 @@ async def run_dm_broadcast(
                 await asyncio.sleep(worker_index * 0.1 + random.uniform(0, 0.08))
                 await _set_worker_status(session_name, "подключение…")
                 async with _session_connect_lock(session_name):
-                    await client.connect()
+                    await _connect_telethon_sqlite_resilient(client)
             except Exception as e:
                 await _log(
                     f"[red]{escape(session_name)}[/]: подключение — {escape(_err_tag(e))}: "
@@ -574,7 +596,7 @@ async def run_dm_broadcast(
                                     await client.disconnect()
                                 except Exception:
                                     pass
-                                await client.connect()
+                                await _connect_telethon_sqlite_resilient(client)
                             if await client.is_user_authorized():
                                 await _log(
                                     f"  [green]reconnect OK[/] [dim]{escape(session_name)}[/]"

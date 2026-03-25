@@ -24,6 +24,7 @@ from src.config import (
     Settings,
     telethon_session_file,
 )
+from src.telethon_client_factory import telegram_client
 from src.telethon_flood_wait import flood_wait_seconds, sleep_flood_wait
 from src.telethon_username_resolve import get_entity_username_try_at_prefix
 
@@ -157,10 +158,10 @@ class AccountPool:
                 if not proxy and self._proxy_pool:
                     proxy = self._get_next_proxy()
         proxy_tg = proxy_url_to_telethon(proxy)
-        return TelegramClient(
-            str(session_path),
-            api_id,
-            api_hash,
+        return telegram_client(
+            session_path,
+            int(api_id),
+            str(api_hash),
             proxy=proxy_tg,
         )
 

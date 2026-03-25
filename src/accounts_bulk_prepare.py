@@ -23,13 +23,14 @@ from src.config import (
     proxy_url_to_telethon,
     telethon_session_file,
 )
+from src.telethon_client_factory import telegram_client
 
 
 def _client_for(acc: dict, proxy: str | None, settings: Settings) -> TelegramClient:
     name = acc.get("session_name") or "default"
     path = telethon_session_file(name, settings)
-    return TelegramClient(
-        str(path),
+    return telegram_client(
+        path,
         int(acc["api_id"]),
         str(acc["api_hash"]),
         proxy=proxy_url_to_telethon(proxy),

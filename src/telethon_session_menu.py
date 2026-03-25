@@ -24,6 +24,7 @@ from src.config import (
     telethon_session_dir_path,
     upsert_telethon_account,
 )
+from src.telethon_client_factory import telegram_client
 
 
 _PROXY_ASK = (
@@ -105,7 +106,7 @@ async def offer_ephemeral_scrape_proxy_reconfigure(
     После успешного отдельного входа: показать текущий прокси и опционально переподключить клиент.
     При ошибке с новым прокси пытается вернуть прежние настройки.
     """
-    from telethon import TelegramClient as TC
+    from src.telethon_client_factory import telegram_client
 
     console.print(f"[dim]Прокси для этого сбора:[/] [cyan]{_redact_proxy_url(current_proxy_url)}[/]")
     if not prompt_yes_no(console, "Сменить прокси перед сбором?", default=False):
@@ -126,7 +127,7 @@ async def offer_ephemeral_scrape_proxy_reconfigure(
         pass
 
     proxy_tg = proxy_url_to_telethon(new_proxy)
-    new_client = TC(session_base, api_id, api_hash, proxy=proxy_tg)
+    new_client = telegram_client(session_base, api_id, api_hash, proxy=proxy_tg)
     try:
         await new_client.connect()
         if not await new_client.is_user_authorized():
@@ -136,7 +137,7 @@ async def offer_ephemeral_scrape_proxy_reconfigure(
             except Exception:
                 pass
             proxy_old = proxy_url_to_telethon(current_proxy_url)
-            restored = TC(session_base, api_id, api_hash, proxy=proxy_old)
+            restored = telegram_client(session_base, api_id, api_hash, proxy=proxy_old)
             await restored.connect()
             if await restored.is_user_authorized():
                 console.print("[yellow]Оставлен прокси как до смены.[/]")
@@ -152,7 +153,7 @@ async def offer_ephemeral_scrape_proxy_reconfigure(
         except Exception:
             pass
         proxy_old = proxy_url_to_telethon(current_proxy_url)
-        restored = TC(session_base, api_id, api_hash, proxy=proxy_old)
+        restored = telegram_client(session_base, api_id, api_hash, proxy=proxy_old)
         try:
             await restored.connect()
             if await restored.is_user_authorized():
@@ -308,7 +309,7 @@ async def _new_login_console(console) -> None:
         # Без ручного ввода: settings или дефолт из config
         return effective_2fa_password()
 
-    client = TelegramClient(session_base, api_id, api_hash)
+    client = telegram_client(session_base, api_id, api_hash)
     try:
         await client.connect()
         if not await client.is_user_authorized():
@@ -411,7 +412,7 @@ async def login_client_for_one_off_scrape(
                 )
                 session_base = str(_sessions_dir() / sn)
                 proxy_tg = proxy_url_to_telethon(proxy_url)
-                client = TelegramClient(session_base, api_id, api_hash, proxy=proxy_tg)
+                client = telegram_client(session_base, api_id, api_hash, proxy=proxy_tg)
                 try:
                     await client.connect()
                     phone = strip_c0_controls(str(last.get("phone") or "").strip())
@@ -533,7 +534,7 @@ async def login_client_for_one_off_scrape(
     proxy_tg = proxy_url_to_telethon(proxy_url)
     session_base = str(_sessions_dir() / session_name)
 
-    client = TelegramClient(session_base, api_id, api_hash, proxy=proxy_tg)
+    client = telegram_client(session_base, api_id, api_hash, proxy=proxy_tg)
     try:
         await client.connect()
         if not await client.is_user_authorized():
