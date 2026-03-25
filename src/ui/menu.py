@@ -658,11 +658,13 @@ def _run_broadcast_from_bundle_menu() -> None:
         f"{_mk('2')} Один аккаунт из списка — [bold]без прокси[/] [dim](только эта сессия; как «общий» в п.5)[/]"
     )
     console.print(
-        f"{_mk('3')} Отдельный вход в консоли [dim](api, телефон, код — как п.5 → один аккаунт для сбора)[/]"
+        f"{_mk('3')} Отдельный вход [dim](телефон, код; API — [bold]случайная пара из apis.txt[/] пакета; "
+        f"прокси — URL или host:port:user:pass)[/]"
     )
     acc_mode = Prompt.ask("Режим аккаунтов", choices=["1", "2", "3"], default="1")
 
     broadcast_extra_kw: dict = {}
+    broadcast_package_api_pair: tuple[int, str] | None = None
 
     if acc_mode == "1":
         if not load_accounts():
@@ -696,6 +698,22 @@ def _run_broadcast_from_bundle_menu() -> None:
         broadcast_extra_kw["no_proxy"] = True
         console.print(
             "[dim]Рассылка только с выбранного аккаунта; прокси для этого прогона отключены.[/]"
+        )
+    elif acc_mode == "3":
+        api_pool: list[tuple[int, str]] = []
+        for sl in slices:
+            if sl.zip_path.is_file():
+                api_pool.extend(load_api_pairs_from_file(sl.apis_file))
+        if not api_pool:
+            console.print(
+                "[red]Нет пар api_id:api_hash для отдельного входа — проверьте apis.txt у слайсов с ZIP.[/]"
+            )
+            Prompt.ask("\n[dim]Enter — назад[/]", default="")
+            return
+        broadcast_package_api_pair = random.choice(api_pool)
+        console.print(
+            f"[dim]Для входа выбрана случайная пара из пакета: [bold]api_id={broadcast_package_api_pair[0]}[/] "
+            f"[dim](hash скрыт). Дальше — телефон, код, опционально прокси.[/]"
         )
 
     cat = Prompt.ask("Категория базы", choices=["hot", "warm", "all"], default="hot")
@@ -731,7 +749,10 @@ def _run_broadcast_from_bundle_menu() -> None:
     async def _go_async():
         db = get_db()
         if acc_mode == "3":
-            logged = await login_client_for_one_off_scrape(console)
+            logged = await login_client_for_one_off_scrape(
+                console,
+                package_api_pair=broadcast_package_api_pair,
+            )
             if not logged:
                 return None, None
             client, meta = logged

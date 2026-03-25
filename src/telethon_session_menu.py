@@ -339,10 +339,17 @@ async def _new_login_console(console) -> None:
         console.print(f"[green]Сохранено в {accounts_json_path()}[/]")
 
 
-async def login_client_for_one_off_scrape(console):
+async def login_client_for_one_off_scrape(
+    console,
+    *,
+    package_api_pair: tuple[int, str] | None = None,
+):
     """
-    Разовая авторизация для сбора базы (меню 2→1→отдельный).
+    Разовая авторизация для сбора базы (меню 2→1→отдельный) или рассылки (9→6, отдельный вход).
     Можно продолжить прошлую сессию + api_id/api_hash из output/last_scrape_ephemeral_login.json.
+
+    ``package_api_pair`` — если задано (например случайная пара из apis.txt пакета), запрос api_id/api_hash
+    в консоли не показывается; при отказе от прошлой сессии используется эта пара.
 
     Возвращает (TelegramClient, meta) с уже подключённым клиентом; disconnect — у вызывающего.
     meta: session_name, api_id, api_hash, phone, proxy_url (str | None).
@@ -485,10 +492,20 @@ async def login_client_for_one_off_scrape(console):
                         pass
                     return None
 
-    pair = _ask_api_id_hash_or_defaults(console, settings)
-    if not pair:
-        return None
-    api_id, api_hash = pair
+    if package_api_pair is not None:
+        api_id, api_hash = int(package_api_pair[0]), str(package_api_pair[1]).strip()
+        if not api_hash:
+            console.print("[red]Пустой api_hash в паре из пакета.[/]")
+            return None
+        console.print(
+            f"[dim]Пара API из пакета [bold](случайный выбор из apis.txt)[/]: "
+            f"api_id={api_id}[/]"
+        )
+    else:
+        pair = _ask_api_id_hash_or_defaults(console, settings)
+        if not pair:
+            return None
+        api_id, api_hash = pair
 
     phone = strip_c0_controls(
         Prompt.ask(
