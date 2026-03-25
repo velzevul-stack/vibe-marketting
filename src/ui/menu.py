@@ -362,7 +362,7 @@ def _render_main_menu() -> str:
     console.print(f"{_mk('2')} Просмотр найденных групп [dim](output/found_groups.json)[/]")
     console.print(f"{_mk('3')} Статистика базы")
     console.print(
-        f"{_mk('4')} База пользователей [dim](SQLite)[/]: поиск по username, просмотр порциями"
+        f"{_mk('4')} База пользователей [dim](SQLite)[/]: поиск, просмотр, экспорт уникальных username → txt"
     )
     console.print()
     console.print("[bold white]── Telegram ──[/]")
@@ -1751,7 +1751,40 @@ async def _run_browse_users_db() -> None:
         f"{_mk('2')} Сбросить метку «username не найден в Telegram» "
         "[dim](все записи с username_not_found_at)[/]"
     )
-    sub_hub = Prompt.ask("Действие", choices=["1", "2"], default="1")
+    console.print(
+        f"{_mk('3')} Экспорт username в .txt [dim](уникальные строки, дубли и разный регистр схлопываются)[/]"
+    )
+    sub_hub = Prompt.ask("Действие", choices=["1", "2", "3"], default="1")
+    if sub_hub == "3":
+        cat_ex = Prompt.ask("Категория", choices=["all", "hot", "warm"], default="all")
+        cat_ex_val = None if cat_ex == "all" else cat_ex
+        ex_nf = Confirm.ask(
+            "Исключить строки с меткой «username не найден в Telegram» [dim](username_not_found_at)[/]?",
+            default=True,
+        )
+        default_out = _PROJECT_ROOT / "output" / "usernames_unique.txt"
+        raw_path = strip_c0_controls(
+            Prompt.ask("Путь к .txt для сохранения", default=str(default_out)).strip()
+        )
+        if not raw_path:
+            console.print("[dim]Отмена.[/]")
+            Prompt.ask("\n[dim]Нажмите Enter…[/]", default="")
+            return
+        out_path = Path(raw_path).expanduser()
+        names = await db.unique_usernames_for_export(
+            category=cat_ex_val,
+            exclude_username_not_found=ex_nf,
+        )
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        body = "\n".join(names) + ("\n" if names else "")
+        out_path.write_text(body, encoding="utf-8")
+        console.print(
+            f"[green]Готово:[/] уникальных username [bold]{len(names)}[/] → "
+            f"[cyan]{escape(str(out_path.resolve()))}[/]"
+        )
+        console.print("[dim]Формат: по одному нику в строке, без @; пустые username в БД не попадают.[/]")
+        Prompt.ask("\n[dim]Нажмите Enter…[/]", default="")
+        return
     if sub_hub == "2":
         n_marked = await db.count_username_not_found()
         if n_marked == 0:

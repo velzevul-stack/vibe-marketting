@@ -243,6 +243,45 @@ class Database:
             )
             await db.commit()
 
+    async def unique_usernames_for_export(
+        self,
+        *,
+        category: str | None = None,
+        exclude_username_not_found: bool = True,
+    ) -> list[str]:
+        """
+        Уникальные непустые username: дедуп по нижнему регистру после strip и снятия ведущего @.
+        Порядок — сортировка по slug (без учёта регистра). Возвращаем без ведущего @.
+        """
+        async with self._connect() as db:
+            conds = [
+                "username IS NOT NULL",
+                "TRIM(COALESCE(username, '')) != ''",
+            ]
+            params: list = []
+            if category and str(category).strip() and category != "all":
+                conds.append("category = ?")
+                params.append(category)
+            if exclude_username_not_found:
+                conds.append(
+                    "(username_not_found_at IS NULL OR username_not_found_at = '')"
+                )
+            sql = f"SELECT username FROM users WHERE {' AND '.join(conds)}"
+            cursor = await db.execute(sql, tuple(params))
+            rows = await cursor.fetchall()
+        seen: dict[str, str] = {}
+        for row in rows:
+            raw = row[0] if row else None
+            if raw is None:
+                continue
+            s = str(raw).strip().lstrip("@")
+            if not s:
+                continue
+            key = s.lower()
+            if key not in seen:
+                seen[key] = s
+        return sorted(seen.values(), key=str.casefold)
+
     async def count_username_not_found(self) -> int:
         """Строки с меткой «username не найден в Telegram»."""
         async with self._connect() as db:
