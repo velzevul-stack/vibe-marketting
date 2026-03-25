@@ -109,11 +109,23 @@ class AccountPool:
         with self._state_lock:
             return [a.session_name for a in self.accounts]
 
+    def ensure_account_state(self, session_name: str) -> None:
+        """Добавить состояние для сессии, если её нет в пуле (одиночная/эфемерная рассылка)."""
+        sn = (session_name or "").strip()
+        if not sn:
+            return
+        with self._state_lock:
+            if any(a.session_name == sn for a in self.accounts):
+                return
+            self.accounts.append(AccountState(session_name=sn))
+
     def get_client(
         self,
         session_name: str,
         prefer_pool_for_read: bool = False,
         settings: Settings | None = None,
+        *,
+        use_proxy: bool | None = None,
     ) -> TelegramClient | None:
         """
         Создать клиент для аккаунта.
@@ -131,7 +143,8 @@ class AccountPool:
         session_path = telethon_session_file(session_name)
         sett = settings or Settings()
         proxy = None
-        if is_proxy_enabled():
+        proxy_on = is_proxy_enabled() if use_proxy is None else bool(use_proxy)
+        if proxy_on:
             if prefer_pool_for_read and not sett.scrape_use_proxy:
                 proxy = None
             else:

@@ -158,19 +158,35 @@ async def run_dm_broadcast(
     exclude_invited: bool = True,
     broadcast_mode: BroadcastMode = "normal",
     send_media: bool = True,
+    only_session_names: frozenset[str] | None = None,
+    no_proxy: bool = False,
+    fixed_client: TelegramClient | None = None,
+    fixed_session_label: str | None = None,
+    disconnect_fixed_client: bool = True,
 ) -> BroadcastTotals:
     """
     Общая asyncio.Queue получателей; при флуде/лимите суток и т.п. задача возвращается в пул
     для других аккаунтов (лимит разных аккаунтов на пользователя — в settings).
     broadcast_mode=privacy_retry — только очередь после UserPrivacyRestricted.
     send_media=False — только текст (send_message), без фото и прекэша.
+    only_session_names — только эти session_name из accounts.json (один или несколько).
+    no_proxy — не использовать прокси при создании клиента из пула (для «один аккаунт без прокси»).
+    fixed_client + fixed_session_label — один заранее подключённый клиент (отдельный вход);
+    при disconnect_fixed_client=False отключение остаётся на вызывающей стороне.
     """
     await db.init()
     texts = read_campaign_texts(bundle)
     images = bundle.image_paths
 
+    fixed_label = (fixed_session_label or "").strip() if fixed_client is not None else ""
+    if fixed_client is not None and not fixed_label:
+        console.print(
+            "[red]Рассылка: передан fixed_client без непустого fixed_session_label.[/]"
+        )
+        return BroadcastTotals()
+
     accs = load_accounts()
-    if not accs:
+    if fixed_client is None and not accs:
         console.print("[red]Нет аккаунтов в accounts.json (импортируйте ZIP из пакета).[/]")
         return BroadcastTotals()
 
@@ -192,19 +208,36 @@ async def run_dm_broadcast(
         return BroadcastTotals()
 
     pool = AccountPool()
-    session_names = [a.get("session_name") for a in accs if a.get("session_name")]
-    session_names = [s for s in session_names if s]
-    if not session_names:
-        console.print("[red]Нет session_name в accounts.json.[/]")
-        return BroadcastTotals()
+    if fixed_client is not None:
+        session_names = [fixed_label]
+    else:
+        session_names = [a.get("session_name") for a in accs if a.get("session_name")]
+        session_names = [s for s in session_names if s]
+        if not session_names:
+            console.print("[red]Нет session_name в accounts.json.[/]")
+            return BroadcastTotals()
 
-    _names_before = len(session_names)
-    session_names = list(dict.fromkeys(session_names))
-    if len(session_names) != _names_before:
-        console.print(
-            "[yellow]В accounts.json были повторы session_name — оставлены уникальные "
-            "(один файл .session нельзя открывать двумя воркерами сразу).[/]"
-        )
+        _names_before = len(session_names)
+        session_names = list(dict.fromkeys(session_names))
+        if len(session_names) != _names_before:
+            console.print(
+                "[yellow]В accounts.json были повторы session_name — оставлены уникальные "
+                "(один файл .session нельзя открывать двумя воркерами сразу).[/]"
+            )
+
+        if only_session_names is not None:
+            want = frozenset(
+                x.strip() for x in only_session_names if x and str(x).strip()
+            )
+            session_names = [s for s in session_names if s in want]
+            if not session_names:
+                console.print(
+                    "[red]Ни один session_name из accounts.json не совпадает с выбранным аккаунтом.[/]"
+                )
+                return BroadcastTotals()
+
+    for _sn in session_names:
+        pool.ensure_account_state(_sn)
 
     daily_limit = int(settings.broadcast_daily_limit_per_account)
     if daily_limit < 0:
@@ -214,6 +247,10 @@ async def run_dm_broadcast(
     retire_after = int(settings.broadcast_retire_session_after_peer_floods)
 
     n_acc = len(session_names)
+    _bc_fixed = fixed_client
+    _bc_label = fixed_label
+    _bc_own_disc = disconnect_fixed_client
+    _broadcast_no_proxy = bool(no_proxy)
     work_q: asyncio.Queue = asyncio.Queue()
     for u in users:
         await work_q.put(_WorkItem(user=u, tried=frozenset()))
@@ -831,10 +868,13 @@ async def run_dm_broadcast(
                     smart_delay(settings.delay_broadcast_min, settings.delay_broadcast_max)
                 )
         finally:
-            try:
-                await client.disconnect()
-            except Exception:
+            if is_fixed and not _bc_own_disc:
                 pass
+            else:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
 
     mode_label = "повтор privacy" if broadcast_mode == "privacy_retry" else "обычная"
     with Progress(
@@ -855,6 +895,11 @@ async def run_dm_broadcast(
             if send_media
             else "медиа: [white]нет[/] [dim](только текст)[/]"
         )
+        _proxy_tail = f"[white]{is_proxy_enabled()}[/]"
+        if fixed_client is not None:
+            _proxy_tail += " [dim](клиент: отдельный вход)[/]"
+        elif no_proxy:
+            _proxy_tail += " [dim](эта рассылка: без прокси)[/]"
         await _log(
             f"[bold]Старт рассылки[/] ([dim]{escape(mode_label)}[/]): аккаунтов [white]{n_acc}[/], "
             f"получателей [white]{len(users)}[/], лимит/акк/сутки UTC: [white]{daily_limit or '—'}[/], "
@@ -862,7 +907,7 @@ async def run_dm_broadcast(
             f"retire после PeerFlood: [white]{retire_after}[/], "
             f"[dim]PeerFlood — пауза по той же лестнице, что FloodWait (без секунд из RPC)[/], "
             f"{media_part}, "
-            f"прокси: [white]{is_proxy_enabled()}[/]"
+            f"прокси: {_proxy_tail}"
         )
         await _log("[dim]Ниже таблица статусов аккаунтов обновляется ~1 с.[/]")
 

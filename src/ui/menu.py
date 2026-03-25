@@ -649,10 +649,54 @@ def _run_broadcast_from_bundle_menu() -> None:
                 return
             console.print(f"[green]Прокси ({escape(sl.label)}):[/] [dim]{escape(msg)}[/]")
 
-    if not load_accounts():
-        console.print("[red]Нет аккаунтов в accounts.json после импорта.[/]")
-        Prompt.ask("\n[dim]Enter — назад[/]", default="")
-        return
+    console.print()
+    console.print("[bold white]── Аккаунты для рассылки ──[/]")
+    console.print(
+        f"{_mk('1')} Все аккаунты из accounts.json [dim](параллельно, обычный режим)[/]"
+    )
+    console.print(
+        f"{_mk('2')} Один аккаунт из списка — [bold]без прокси[/] [dim](только эта сессия; как «общий» в п.5)[/]"
+    )
+    console.print(
+        f"{_mk('3')} Отдельный вход в консоли [dim](api, телефон, код — как п.5 → один аккаунт для сбора)[/]"
+    )
+    acc_mode = Prompt.ask("Режим аккаунтов", choices=["1", "2", "3"], default="1")
+
+    broadcast_extra_kw: dict = {}
+
+    if acc_mode == "1":
+        if not load_accounts():
+            console.print("[red]Нет аккаунтов в accounts.json после импорта.[/]")
+            Prompt.ask("\n[dim]Enter — назад[/]", default="")
+            return
+    elif acc_mode == "2":
+        accs_pick = load_accounts()
+        if not accs_pick:
+            console.print(
+                "[red]Нет аккаунтов в accounts.json.[/] Добавьте сессию: главное меню → [bold]9[/] → [bold]3[/]."
+            )
+            Prompt.ask("\n[dim]Enter — назад[/]", default="")
+            return
+        for i, a in enumerate(accs_pick, 1):
+            name = a.get("session_name", "?")
+            console.print(f"  [cyan]{i}[/]  {escape(str(name))}")
+        pick = _prompt_nonneg_int(
+            "Номер аккаунта для рассылки",
+            default=1,
+            minimum=1,
+            maximum=len(accs_pick),
+        )
+        picked = accs_pick[pick - 1]
+        sn_one = (picked.get("session_name") or "").strip()
+        if not sn_one:
+            console.print("[red]У записи нет session_name.[/]")
+            Prompt.ask("\n[dim]Enter — назад[/]", default="")
+            return
+        broadcast_extra_kw["only_session_names"] = frozenset([sn_one])
+        broadcast_extra_kw["no_proxy"] = True
+        console.print(
+            "[dim]Рассылка только с выбранного аккаунта; прокси для этого прогона отключены.[/]"
+        )
 
     cat = Prompt.ask("Категория базы", choices=["hot", "warm", "all"], default="hot")
     cat_val = None if cat == "all" else cat
@@ -684,9 +728,35 @@ def _run_broadcast_from_bundle_menu() -> None:
     if not Confirm.ask("Начать рассылку?", default=False):
         return
 
-    async def _go():
+    async def _go_async():
         db = get_db()
-        return await run_dm_broadcast(
+        if acc_mode == "3":
+            logged = await login_client_for_one_off_scrape(console)
+            if not logged:
+                return None, None
+            client, meta = logged
+            try:
+                totals = await run_dm_broadcast(
+                    bundle=bundle,
+                    db=db,
+                    settings=sett,
+                    console=console,
+                    category=cat_val,
+                    total_limit=limit,
+                    exclude_invited=ex_inv,
+                    broadcast_mode=broadcast_mode,
+                    send_media=send_media,
+                    fixed_client=client,
+                    fixed_session_label=str(meta.get("session_name") or ""),
+                    disconnect_fixed_client=False,
+                )
+                return totals, meta
+            finally:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+        totals = await run_dm_broadcast(
             bundle=bundle,
             db=db,
             settings=sett,
@@ -696,14 +766,32 @@ def _run_broadcast_from_bundle_menu() -> None:
             exclude_invited=ex_inv,
             broadcast_mode=broadcast_mode,
             send_media=send_media,
+            **broadcast_extra_kw,
         )
+        return totals, None
 
     try:
-        totals = asyncio.run(_go())
+        out = asyncio.run(_go_async())
     except KeyboardInterrupt:
         console.print("\n[yellow]Прервано.[/]")
         Prompt.ask("\n[dim]Enter — назад[/]", default="")
         return
+
+    if out is None:
+        return
+    totals, meta_after = out
+
+    if acc_mode == "3" and meta_after and Confirm.ask(
+        "Добавить этот аккаунт в accounts.json?", default=False
+    ):
+        upsert_telethon_account(
+            meta_after["session_name"],
+            meta_after["api_id"],
+            meta_after["api_hash"],
+            phone=meta_after.get("phone"),
+            proxy=meta_after.get("proxy_url"),
+        )
+        console.print(f"[green]Записано в {accounts_json_path()}[/]")
 
     console.print()
     un_nf = totals.username_not_found_marked
