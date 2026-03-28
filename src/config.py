@@ -1141,6 +1141,57 @@ def load_api_pairs_from_file(path: Path) -> list[tuple[int, str]]:
     return out
 
 
+def account_row_for_session_name(session_name: str) -> dict | None:
+    """Первая строка accounts.json с данным ``session_name``."""
+    sn = (session_name or "").strip()
+    if not sn:
+        return None
+    for r in load_accounts_all():
+        if not isinstance(r, dict) or r.get("_template"):
+            continue
+        if (r.get("session_name") or "").strip() == sn:
+            return r
+    return None
+
+
+def account_session_has_full_api(session_name: str) -> bool:
+    """У аккаунта есть ``api_id`` и ``api_hash`` (можно поднимать Telethon)."""
+    row = account_row_for_session_name(session_name)
+    if not row:
+        return False
+    return bool(row.get("api_id") and row.get("api_hash"))
+
+
+def assign_apis_explicit_to_stems(
+    mapping: dict[str, tuple[int, str]],
+    settings: Settings | None = None,
+) -> tuple[bool, str]:
+    """
+    Для каждого стема из ``mapping`` записать указанные ``api_id``/``api_hash``
+    в accounts.json и sidecar ``<stem>.json``.
+    """
+    if not mapping:
+        return True, "явное назначение API не требуется (пустой маппинг)"
+    s = settings or Settings()
+    rows = load_accounts_all()
+    by_name: dict[str, dict] = {}
+    for r in rows:
+        if not isinstance(r, dict) or r.get("_template"):
+            continue
+        name = (r.get("session_name") or "").strip()
+        if name:
+            by_name[name] = r
+    for stem, (aid, ahash) in mapping.items():
+        row = by_name.get(stem)
+        if not row:
+            return False, f"Нет session_name={stem!r} в accounts.json (импортируйте ZIP или синхронизируйте сессии)"
+        row["api_id"] = int(aid)
+        row["api_hash"] = str(ahash).strip()
+        write_api_to_session_sidecar(stem, aid, ahash, s)
+    save_accounts_all(rows)
+    return True, str(accounts_json_path())
+
+
 def assign_apis_round_robin_to_accounts(
     api_pairs: list[tuple[int, str]],
     settings: Settings | None = None,

@@ -191,6 +191,193 @@ def _cli_broadcast(
     return 0
 
 
+def _cli_csv_broadcast(
+    dir_path: str,
+    csv_path: str,
+    delay_minutes: float,
+    zip_conflict: str,
+    *,
+    csv_limit: int | None,
+    send_media: bool = True,
+    sent_log: str | None = None,
+    skip_sent: bool = False,
+) -> int:
+    """Рассылка по CSV из пакета: apis_sessions.txt (явно) + apis.txt (RR), без БД, jsonl-лог."""
+    import asyncio
+    import zipfile
+    from collections import defaultdict
+
+    from rich.console import Console
+
+    from src.account_zip_import import import_sessions_zip, print_zip_import_report
+    from src.broadcast.bundle import (
+        APIS_SESSIONS_FILENAME,
+        discover_campaign_import_slices,
+        load_campaign_bundle,
+        parse_apis_sessions_file,
+        validate_campaign_bundle,
+        validate_extra_import_slices,
+    )
+    from src.broadcast.csv_runner import (
+        load_csv_recipients,
+        load_sent_user_ids_from_jsonl,
+        run_csv_dm_broadcast,
+    )
+    from src.config import (
+        Settings,
+        account_session_has_full_api,
+        assign_apis_explicit_to_stems,
+        assign_apis_round_robin_to_accounts,
+        assign_proxies_round_robin_to_accounts,
+        load_api_pairs_from_file,
+        load_proxy_pool_from_file,
+    )
+
+    con = Console()
+    root = Path(dir_path).expanduser().resolve()
+    repo_out = Path(__file__).resolve().parent / "output"
+    default_log = repo_out / "csv_broadcast_sent.jsonl"
+    log_path = (
+        Path(sent_log).expanduser().resolve()
+        if sent_log
+        else default_log
+    )
+
+    bundle = load_campaign_bundle(root)
+    slices = discover_campaign_import_slices(root)
+    errs = validate_campaign_bundle(bundle, require_images=send_media)
+    errs.extend(validate_extra_import_slices(slices))
+    if errs:
+        for e in errs:
+            con.print(f"[red]{e}[/]")
+        return 1
+
+    sett = Settings()
+    stem_to_apis_file: dict[str, Path] = {}
+    all_imported_order: list[str] = []
+
+    def _apply_slice_csv(sl) -> int:
+        if not sl.zip_path.is_file():
+            con.print(f"[yellow]Пропуск слайса {sl.label}: нет {sl.zip_path.name}[/]")
+            return 0
+        try:
+            rep = import_sessions_zip(sl.zip_path, on_conflict=zip_conflict, settings=sett)
+        except (OSError, zipfile.BadZipFile) as e:
+            con.print(f"[red]ZIP {sl.zip_path.name}: {e}[/]")
+            return 1
+        con.print(f"[bold]{sl.label}[/] — {sl.zip_path.name}")
+        print_zip_import_report(con, rep)
+        for stem in rep.imported_stems:
+            stem_to_apis_file[stem] = sl.apis_file
+            all_imported_order.append(stem)
+        stems = frozenset(rep.imported_stems)
+        proxies = load_proxy_pool_from_file(sl.proxies_file)
+        if not proxies:
+            con.print(f"[red]В {sl.proxies_file.name} нет валидных прокси.[/]")
+            return 1
+        if stems:
+            ok_px, msg_px = assign_proxies_round_robin_to_accounts(
+                sett, proxy_pool=proxies, only_session_names=stems
+            )
+        elif sl.label == "accounts":
+            ok_px, msg_px = assign_proxies_round_robin_to_accounts(sett, proxy_pool=proxies)
+        else:
+            con.print(
+                f"[yellow]{sl.label}: в ZIP не скопировано новых сессий — прокси для слайса не трогаем.[/]"
+            )
+            return 0
+        if not ok_px:
+            con.print(f"[red]{msg_px}[/]")
+            return 1
+        con.print(f"[dim]Прокси ({sl.label}):[/] {msg_px}")
+        return 0
+
+    for sl in slices:
+        if _apply_slice_csv(sl):
+            return 1
+
+    unique_imported = list(dict.fromkeys(all_imported_order))
+    if not unique_imported:
+        con.print(
+            "[red]Не импортировано ни одной новой сессии из ZIP "
+            "(все конфликты skip или архивы пусты).[/]"
+        )
+        return 1
+
+    map_path = root / APIS_SESSIONS_FILENAME
+    mapping, map_errs = parse_apis_sessions_file(map_path)
+    for e in map_errs:
+        con.print(f"[red]{e}[/]")
+    if map_errs:
+        return 1
+
+    if mapping:
+        ok_exp, msg_exp = assign_apis_explicit_to_stems(mapping, sett)
+        if not ok_exp:
+            con.print(f"[red]{msg_exp}[/]")
+            return 1
+        con.print(f"[dim]Явное API ({APIS_SESSIONS_FILENAME}):[/] {msg_exp}")
+
+    need_rr_by_file: dict[Path, list[str]] = defaultdict(list)
+    for stem in unique_imported:
+        if not account_session_has_full_api(stem):
+            ap = stem_to_apis_file.get(stem) or bundle.apis_file
+            need_rr_by_file[ap].append(stem)
+
+    for ap_path, stems in need_rr_by_file.items():
+        pairs = load_api_pairs_from_file(ap_path)
+        if not pairs:
+            con.print(
+                f"[red]Для стемов {stems!r} нужен round-robin API, "
+                f"но в {ap_path.name} нет валидных пар api_id:api_hash.[/]"
+            )
+            return 1
+        ok_rr, msg_rr = assign_apis_round_robin_to_accounts(
+            pairs, sett, only_session_names=frozenset(stems)
+        )
+        if not ok_rr:
+            con.print(f"[red]{msg_rr}[/]")
+            return 1
+        con.print(f"[dim]API RR ({ap_path.name}):[/] {msg_rr}")
+
+    active_sessions = sorted(
+        {s for s in unique_imported if account_session_has_full_api(s)}
+    )
+    if not active_sessions:
+        con.print("[red]После назначения API нет ни одной активной импортированной сессии.[/]")
+        return 1
+
+    skip_ids = load_sent_user_ids_from_jsonl(log_path) if skip_sent else frozenset()
+    csv_p = Path(csv_path).expanduser().resolve()
+    loaded = load_csv_recipients(csv_p, limit=csv_limit, skip_user_ids=skip_ids)
+    for w in loaded.warnings[:30]:
+        con.print(f"[yellow]{w}[/]")
+    if not loaded.users:
+        con.print("[red]Нет получателей в CSV (после лимита и --csv-skip-sent).[/]")
+        return 1
+
+    delay_sec = max(0.0, float(delay_minutes) * 60.0)
+
+    async def _run():
+        return await run_csv_dm_broadcast(
+            bundle=bundle,
+            settings=sett,
+            console=con,
+            recipients=loaded.users,
+            session_names=active_sessions,
+            delay_seconds=delay_sec,
+            send_media=send_media,
+            sent_log_path=log_path,
+        )
+
+    totals = asyncio.run(_run())
+    con.print(
+        f"[bold]CSV рассылка завершена:[/] ok={totals.sent} fail={totals.failed} skip={totals.skipped} "
+        f"[dim]лог:[/] {log_path}"
+    )
+    return 0
+
+
 def _cli_cleanup(*, clear_accounts: bool, wipe_sessions: bool, clear_proxies: bool) -> int:
     from rich.console import Console
     from src.config import (
@@ -276,6 +463,8 @@ def main() -> None:
             "  python main.py --proxy on       снова использовать прокси из конфига\n"
             "  python main.py --proxy status   текущее значение proxy_enabled\n"
             "  python main.py --broadcast ./campaign --broadcast-limit 300\n"
+            "  python main.py --csv-broadcast ./campaign --csv-recipients members.csv "
+            "--csv-delay-minutes 30\n"
             "  python main.py --clear-accounts --wipe-sessions --clear-proxies\n"
             "  python main.py --strip-account-apis     снять api с accounts + sidecar (перед push)\n"
             "\n"
@@ -329,6 +518,43 @@ def main() -> None:
         help="Рассылка без вложений: только text_1/2.txt (без 1.jpg–3.jpg)",
     )
     parser.add_argument(
+        "--csv-broadcast",
+        metavar="DIR",
+        help="Рассылка по CSV из пакета (ZIP, proxies, тексты; apis_sessions.txt + apis.txt)",
+    )
+    parser.add_argument(
+        "--csv-recipients",
+        metavar="FILE",
+        help="CSV с колонками User ID, Username (вместе с --csv-broadcast)",
+    )
+    parser.add_argument(
+        "--csv-delay-minutes",
+        type=float,
+        default=30.0,
+        help="Пауза в минутах после логина до 1-го ЛС и между отправками (по умолчанию 30)",
+    )
+    parser.add_argument(
+        "--csv-limit",
+        type=int,
+        default=None,
+        help="Максимум строк из CSV (после дедупа и --csv-skip-sent)",
+    )
+    parser.add_argument(
+        "--csv-sent-log",
+        metavar="PATH",
+        help="JSONL успешных отправок (по умолчанию output/csv_broadcast_sent.jsonl)",
+    )
+    parser.add_argument(
+        "--csv-skip-sent",
+        action="store_true",
+        help="Не слать повторно user_id из JSONL (--csv-sent-log)",
+    )
+    parser.add_argument(
+        "--csv-broadcast-text-only",
+        action="store_true",
+        help="Как --broadcast-text-only: только text_1/2.txt",
+    )
+    parser.add_argument(
         "--clear-accounts",
         action="store_true",
         help="Очистить config/accounts.json (пустой список)",
@@ -378,6 +604,21 @@ def main() -> None:
                 args.broadcast_zip_conflict,
                 args.broadcast_mode,
                 send_media=not args.broadcast_text_only,
+            )
+        )
+    if args.csv_broadcast or args.csv_recipients or args.csv_skip_sent:
+        if not args.csv_broadcast or not args.csv_recipients:
+            parser.error("--csv-broadcast и --csv-recipients задаются вместе")
+        raise SystemExit(
+            _cli_csv_broadcast(
+                args.csv_broadcast,
+                args.csv_recipients,
+                args.csv_delay_minutes,
+                args.broadcast_zip_conflict,
+                csv_limit=args.csv_limit,
+                send_media=not args.csv_broadcast_text_only,
+                sent_log=args.csv_sent_log,
+                skip_sent=args.csv_skip_sent,
             )
         )
     if args.clear_accounts or args.wipe_sessions or args.clear_proxies:

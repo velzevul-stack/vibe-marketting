@@ -5,7 +5,9 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from src.config import load_proxy_pool_from_file
+from src.config import load_proxy_pool_from_file, parse_api_credentials_line
+
+APIS_SESSIONS_FILENAME = "apis_sessions.txt"
 
 
 @dataclass(frozen=True)
@@ -174,3 +176,45 @@ def read_campaign_texts(b: CampaignBundle) -> tuple[str, str]:
     t1 = b.text_1.read_text(encoding="utf-8").strip()
     t2 = b.text_2.read_text(encoding="utf-8").strip()
     return t1, t2
+
+
+def parse_apis_sessions_file(path: Path) -> tuple[dict[str, tuple[int, str]], list[str]]:
+    """
+    Файл ``apis_sessions.txt``: строки ``api_id:api_hash stem1 stem2 ...``.
+    Возвращает (stem -> (api_id, api_hash), список ошибок). При дубликате стема — ошибка.
+    """
+    p = Path(path)
+    if not p.is_file():
+        return {}, []
+    mapping: dict[str, tuple[int, str]] = {}
+    errs: list[str] = []
+    try:
+        lines = p.read_text(encoding="utf-8").splitlines()
+    except OSError as e:
+        return {}, [f"{p.name}: не прочитать файл: {e}"]
+    for i, raw in enumerate(lines, 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            if parse_api_credentials_line(line):
+                errs.append(
+                    f"{p.name}:{i}: после api_id:api_hash нужны стемы сессий (имена без .session)"
+                )
+            else:
+                errs.append(f"{p.name}:{i}: ожидается ``api_id:api_hash stem1 stem2 ...``")
+            continue
+        cred = parse_api_credentials_line(parts[0])
+        if not cred:
+            errs.append(f"{p.name}:{i}: неверная пара api_id:api_hash ({parts[0]!r})")
+            continue
+        for st in parts[1:]:
+            stem = st.strip()
+            if not stem:
+                continue
+            if stem in mapping:
+                errs.append(f"{p.name}: session stem {stem!r} встречается дважды")
+                continue
+            mapping[stem] = cred
+    return mapping, errs

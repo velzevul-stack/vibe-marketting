@@ -15,6 +15,26 @@ python main.py -h   # справка по флагам (--assign-proxies и т.�
 
 Подробная инструкция: [docs/INSTALLATION.md](docs/INSTALLATION.md)
 
+## Рассылка по CSV (без меню, без SQLite)
+
+Каталог пакета тот же, что для `--broadcast`: `accounts.zip`, `apis.txt`, `proxies.txt`, `text_1.txt`, `text_2.txt`, при медиа — `1.jpg`–`3.jpg`.
+
+Дополнительно в корне пакета можно положить **`apis_sessions.txt`**: строки вида `api_id:api_hash stem1 stem2 …` (стем = имя файла сессии без `.session`). Таким сессиям назначается **строго эта** пара ключей. Сессии из ZIP, **не** перечисленные в этом файле, получают `api_id`/`api_hash` **round-robin из `apis.txt`** (для `accounts2.zip` используется `apis2.txt` и т.д., как при обычном импорте).
+
+CSV: колонки **`User ID`** (числовой Telegram id) и при необходимости **`Username`**. Дедуп по `User ID`. Успешные отправки дописываются в JSONL (по умолчанию `output/csv_broadcast_sent.jsonl`); флаг **`--csv-skip-sent`** пропускает уже залогированные id.
+
+Между **первым** сообщением после входа и между последующими используется одна и та же пауза **`--csv-delay-minutes`** (например `30` = раз в полчаса). Relay между аккаунтами **нет**: у каждого аккаунта своя очередь получателей.
+
+Пример:
+
+```bash
+python main.py --csv-broadcast ./campaign --csv-recipients ./members.csv --csv-delay-minutes 30
+python main.py --csv-broadcast ./campaign --csv-recipients ./members.csv --csv-limit 250 --csv-skip-sent
+python main.py --csv-broadcast ./campaign --csv-recipients ./members.csv --csv-broadcast-text-only
+```
+
+Поведение при конфликте имён сессий на диске задаётся тем же флагом, что и для рассылки из БД: **`--broadcast-zip-conflict skip|overwrite`**.
+
 ## Установка
 
 ```bash
