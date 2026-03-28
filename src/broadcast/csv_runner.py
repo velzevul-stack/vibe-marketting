@@ -312,10 +312,11 @@ async def run_csv_dm_broadcast(
                 flood_round = 0
                 peer_round = 0
 
-                async def _body_send() -> None:
+                async def _body_send() -> bool:
+                    """True если сообщение ушло; False если нет peer (без исключения)."""
                     peer = await _resolve_peer(client, u)
                     if peer is None:
-                        raise LookupError("no_peer")
+                        return False
                     if send_media:
                         media = (
                             cached_handles[h % 3]
@@ -325,12 +326,18 @@ async def run_csv_dm_broadcast(
                         await client.send_file(peer, media, caption=caption)
                     else:
                         await client.send_message(peer, caption)
+                    return True
 
                 async def _send_with_reconnect() -> str:
                     """Возвращает ``sent`` | ``skipped`` | ``fail_conn``; бросает FloodWait/PeerFlood и др."""
                     while True:
                         try:
-                            await _body_send()
+                            if not await _body_send():
+                                await _log(
+                                    f"  [yellow]skip[/] {escape(session_name)} {escape(preview)} — нет peer"
+                                )
+                                await _add_totals(session_name, skipped=1)
+                                return "skipped"
                             pool.mark_used(session_name)
                             await _log(f"  [green]OK[/] {escape(session_name)} → {escape(preview)}")
                             await _add_totals(session_name, sent=1)
@@ -345,14 +352,6 @@ async def run_csv_dm_broadcast(
                                     },
                                 )
                             return "sent"
-                        except LookupError as le:
-                            if str(le) == "no_peer":
-                                await _log(
-                                    f"  [yellow]skip[/] {escape(session_name)} {escape(preview)} — нет peer"
-                                )
-                                await _add_totals(session_name, skipped=1)
-                                return "skipped"
-                            raise
                         except (ConnectionError, OSError) as e:
                             if not _is_telethon_disconnected_error(e):
                                 raise
