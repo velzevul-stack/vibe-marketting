@@ -51,6 +51,7 @@ from src.broadcast.bundle import (
     validate_campaign_bundle,
     validate_extra_import_slices,
 )
+from src.broadcast.campaign_assign import apply_package_api_proxy_assignments
 from src.broadcast.runner import run_dm_broadcast
 from src.groups_txt_io import export_groups_to_txt, import_txt_to_found_groups, load_found_groups_list
 from src.db import get_db
@@ -553,9 +554,10 @@ def _run_broadcast_from_bundle_menu() -> None:
     console.print()
     console.print("[bold white]── Рассылка из пакета ──[/]")
     console.print(
-        "[dim]В одном каталоге-пакете:[/] [cyan]accounts.zip[/], [cyan]apis.txt[/], [cyan]proxies.txt[/], "
-        "тексты и jpg; [dim]опционально рядом[/] [cyan]accounts2.zip[/] + [cyan]apis2.txt[/] + [cyan]proxies2.txt[/] "
-        "[dim](и accounts3… — только своим ZIP)[/]"
+        "[dim]В одном каталоге-пакете:[/] [cyan]accounts.zip[/], [cyan]apis.txt[/], "
+        "[cyan]proxy.txt[/] [dim](или[/] [cyan]proxies.txt[/][dim])[/], тексты и jpg; опционально "
+        "[cyan]sessions_bind.txt[/], [cyan]apis_sessions.txt[/]; "
+        "[dim]рядом[/] [cyan]accounts2.zip[/] + [cyan]apis2.txt[/] + [cyan]proxy2.txt[/] …"
     )
     sett = Settings()
     default_dir = _PROJECT_ROOT / sett.campaign_dir
@@ -577,6 +579,9 @@ def _run_broadcast_from_bundle_menu() -> None:
     console.print("[green]Пакет проверен.[/]")
 
     stems_by_label: dict[str, frozenset[str]] = {}
+    stem_to_apis_file: dict[str, Path] = {}
+    stem_to_proxy_file: dict[str, Path] = {}
+    unique_import_order: list[str] = []
 
     if Confirm.ask("Импортировать ZIP сессий (все accounts.zip, accounts2.zip…) в каталог сессий?", default=True):
         mode = "overwrite" if Confirm.ask("Перезаписать совпадающие файлы на диске?", default=False) else "skip"
@@ -598,6 +603,15 @@ def _run_broadcast_from_bundle_menu() -> None:
         for sl in slices:
             stems_by_label[sl.label] = frozenset()
 
+    seen_stem: set[str] = set()
+    for sl in slices:
+        for st in stems_by_label.get(sl.label, frozenset()):
+            stem_to_apis_file[st] = sl.apis_file
+            stem_to_proxy_file[st] = sl.proxies_file
+            if st not in seen_stem:
+                seen_stem.add(st)
+                unique_import_order.append(st)
+
     for sl in slices:
         if not sl.zip_path.is_file():
             continue
@@ -608,47 +622,54 @@ def _run_broadcast_from_bundle_menu() -> None:
             return
         proxy_lines = load_proxy_pool_from_file(sl.proxies_file)
         if not proxy_lines:
-            console.print(f"[red]В {escape(sl.proxies_file.name)} нет валидных строк прокси.[/]")
+            console.print(
+                f"[red]В {escape(sl.proxies_file.name)} нет валидных строк прокси "
+                f"(или создайте proxy.txt / proxies.txt).[/]"
+            )
             Prompt.ask("\n[dim]Enter — назад[/]", default="")
             return
 
-    if Confirm.ask("Назначить API и прокси по слайсам (только сессии из соответствующего ZIP)?", default=True):
-        for sl in slices:
-            if not sl.zip_path.is_file():
-                continue
-            api_pairs = load_api_pairs_from_file(sl.apis_file)
-            proxy_lines = load_proxy_pool_from_file(sl.proxies_file)
-            stems = stems_by_label.get(sl.label, frozenset())
-            if stems:
-                ok_api, msg_api = assign_apis_round_robin_to_accounts(
-                    api_pairs, sett, only_session_names=stems
-                )
-            elif sl.label == "accounts":
+    if Confirm.ask(
+        "Назначить API и прокси (sessions_bind → apis_sessions → RR apis.txt / proxy.txt)?",
+        default=True,
+    ):
+        if unique_import_order:
+            if not apply_package_api_proxy_assignments(
+                console=console,
+                sett=sett,
+                root=root,
+                unique_imported=unique_import_order,
+                stem_to_apis_file=stem_to_apis_file,
+                stem_to_proxy_file=stem_to_proxy_file,
+            ):
+                Prompt.ask("\n[dim]Enter — назад[/]", default="")
+                return
+        else:
+            legacy_ok = False
+            for sl in slices:
+                if not sl.zip_path.is_file() or sl.label != "accounts":
+                    continue
+                api_pairs = load_api_pairs_from_file(sl.apis_file)
+                proxy_lines = load_proxy_pool_from_file(sl.proxies_file)
                 ok_api, msg_api = assign_apis_round_robin_to_accounts(api_pairs, sett)
-            else:
-                console.print(
-                    f"[yellow]{escape(sl.label)}: нет стемов после импорта — "
-                    "пропуск API/прокси (импортируйте ZIP или используйте CLI).[/]"
-                )
-                continue
-            if not ok_api:
-                console.print(f"[red]{escape(msg_api)}[/]")
-                Prompt.ask("\n[dim]Enter — назад[/]", default="")
-                return
-            console.print(f"[green]API ({escape(sl.label)}):[/] [dim]{escape(msg_api)}[/]")
-            if stems:
-                ok, msg = assign_proxies_round_robin_to_accounts(
-                    sett, proxy_pool=proxy_lines, only_session_names=stems
-                )
-            elif sl.label == "accounts":
+                if not ok_api:
+                    console.print(f"[red]{escape(msg_api)}[/]")
+                    Prompt.ask("\n[dim]Enter — назад[/]", default="")
+                    return
+                console.print(f"[green]API ({escape(sl.label)}):[/] [dim]{escape(msg_api)}[/]")
                 ok, msg = assign_proxies_round_robin_to_accounts(sett, proxy_pool=proxy_lines)
-            else:
-                continue
-            if not ok:
-                console.print(f"[red]{escape(msg)}[/]")
-                Prompt.ask("\n[dim]Enter — назад[/]", default="")
-                return
-            console.print(f"[green]Прокси ({escape(sl.label)}):[/] [dim]{escape(msg)}[/]")
+                if not ok:
+                    console.print(f"[red]{escape(msg)}[/]")
+                    Prompt.ask("\n[dim]Enter — назад[/]", default="")
+                    return
+                console.print(f"[green]Прокси ({escape(sl.label)}):[/] [dim]{escape(msg)}[/]")
+                legacy_ok = True
+                break
+            if not legacy_ok:
+                console.print(
+                    "[yellow]Нет импортированных стемов и нет accounts.zip — "
+                    "назначьте API/прокси вручную или импортируйте ZIP.[/]"
+                )
 
     combined_api: list[tuple[int, str]] = []
     for sl in slices:

@@ -71,7 +71,7 @@ def _cli_broadcast(
     *,
     send_media: bool = True,
 ) -> int:
-    """Рассылка из каталога-пакета без меню (ZIP, apis.txt, proxies.txt, рассылка)."""
+    """Рассылка из каталога-пакета без меню (ZIP, apis.txt, proxy.txt, sessions_bind и т.д.)."""
     import asyncio
     import zipfile
 
@@ -84,9 +84,11 @@ def _cli_broadcast(
         validate_campaign_bundle,
         validate_extra_import_slices,
     )
+    from src.broadcast.campaign_assign import apply_package_api_proxy_assignments
     from src.broadcast.runner import run_dm_broadcast
     from src.config import (
         Settings,
+        assign_apis_fill_missing_in_accounts,
         assign_apis_round_robin_to_accounts,
         assign_proxies_round_robin_to_accounts,
         load_api_pairs_from_file,
@@ -106,8 +108,11 @@ def _cli_broadcast(
         return 1
 
     sett = Settings()
+    stem_to_apis_file: dict[str, Path] = {}
+    stem_to_proxy_file: dict[str, Path] = {}
+    all_imported_order: list[str] = []
 
-    def _apply_slice(sl) -> int:
+    def _import_slice(sl) -> int:
         if not sl.zip_path.is_file():
             con.print(f"[yellow]Пропуск слайса {sl.label}: нет {sl.zip_path.name}[/]")
             return 0
@@ -118,48 +123,76 @@ def _cli_broadcast(
             return 1
         con.print(f"[bold]{sl.label}[/] — {sl.zip_path.name}")
         print_zip_import_report(con, rep)
-        stems = frozenset(rep.imported_stems)
-        api_pairs = load_api_pairs_from_file(sl.apis_file)
-        if not api_pairs:
-            con.print(f"[red]В {sl.apis_file.name} нет валидных пар api_id:api_hash.[/]")
-            return 1
-        if stems:
-            ok_api, msg_api = assign_apis_round_robin_to_accounts(
-                api_pairs, sett, only_session_names=stems
-            )
-        elif sl.label == "accounts":
-            ok_api, msg_api = assign_apis_round_robin_to_accounts(api_pairs, sett)
-        else:
-            con.print(
-                f"[yellow]{sl.label}: в ZIP не скопировано новых сессий — API/прокси для этого слайса не трогаем.[/]"
-            )
-            return 0
-        if not ok_api:
-            con.print(f"[red]{msg_api}[/]")
-            return 1
-        con.print(f"[dim]API ({sl.label}):[/] {msg_api}")
-
-        proxies = load_proxy_pool_from_file(sl.proxies_file)
-        if not proxies:
-            con.print(f"[red]В {sl.proxies_file.name} нет валидных прокси.[/]")
-            return 1
-        if stems:
-            ok_px, msg_px = assign_proxies_round_robin_to_accounts(
-                sett, proxy_pool=proxies, only_session_names=stems
-            )
-        elif sl.label == "accounts":
-            ok_px, msg_px = assign_proxies_round_robin_to_accounts(sett, proxy_pool=proxies)
-        else:
-            return 0
-        if not ok_px:
-            con.print(f"[red]{msg_px}[/]")
-            return 1
-        con.print(f"[dim]Прокси ({sl.label}):[/] {msg_px}")
+        for stem in rep.imported_stems:
+            stem_to_apis_file[stem] = sl.apis_file
+            stem_to_proxy_file[stem] = sl.proxies_file
+            all_imported_order.append(stem)
         return 0
 
     for sl in slices:
-        if _apply_slice(sl):
+        if _import_slice(sl):
             return 1
+
+    unique_imported = list(dict.fromkeys(all_imported_order))
+    if unique_imported:
+        if not apply_package_api_proxy_assignments(
+            console=con,
+            sett=sett,
+            root=root,
+            unique_imported=unique_imported,
+            stem_to_apis_file=stem_to_apis_file,
+            stem_to_proxy_file=stem_to_proxy_file,
+        ):
+            return 1
+    else:
+        assigned = False
+        for sl in slices:
+            if not sl.zip_path.is_file():
+                continue
+            api_pairs = load_api_pairs_from_file(sl.apis_file)
+            if not api_pairs:
+                con.print(f"[red]В {sl.apis_file.name} нет валидных пар api_id:api_hash.[/]")
+                return 1
+            proxy_lines = load_proxy_pool_from_file(sl.proxies_file)
+            if not proxy_lines:
+                con.print(f"[red]В {sl.proxies_file.name} нет валидных прокси.[/]")
+                return 1
+            if sl.label != "accounts":
+                continue
+            ok_api, msg_api = assign_apis_round_robin_to_accounts(api_pairs, sett)
+            if not ok_api:
+                con.print(f"[red]{msg_api}[/]")
+                return 1
+            con.print(f"[dim]API ({sl.label}, все аккаунты):[/] {msg_api}")
+            ok_px, msg_px = assign_proxies_round_robin_to_accounts(
+                sett, proxy_pool=proxy_lines
+            )
+            if not ok_px:
+                con.print(f"[red]{msg_px}[/]")
+                return 1
+            con.print(f"[dim]Прокси ({sl.label}, все аккаунты):[/] {msg_px}")
+            assigned = True
+            break
+        if not assigned:
+            con.print(
+                "[yellow]Новые сессии из ZIP не импортированы; "
+                "sessions_bind/apis_sessions не применялись. "
+                "Назначьте API/прокси вручную или повторите импорт.[/]"
+            )
+
+    combined_api: list[tuple[int, str]] = []
+    for sl in slices:
+        if sl.zip_path.is_file():
+            combined_api.extend(load_api_pairs_from_file(sl.apis_file))
+    if combined_api:
+        ok_fill, msg_fill, n_fill = assign_apis_fill_missing_in_accounts(combined_api, sett)
+        if ok_fill and n_fill:
+            con.print(
+                f"[dim]API из пакета дописан аккаунтам без ключей:[/] [white]{n_fill}[/] "
+                f"[dim]({msg_fill})[/]"
+            )
+        elif not ok_fill:
+            con.print(f"[yellow]{msg_fill}[/]")
 
     cat_val = None if category == "all" else category
     mode = "privacy_retry" if broadcast_mode == "privacy_retry" else "normal"
@@ -202,22 +235,20 @@ def _cli_csv_broadcast(
     sent_log: str | None = None,
     skip_sent: bool = False,
 ) -> int:
-    """Рассылка по CSV из пакета: apis_sessions.txt (явно) + apis.txt (RR), без БД, jsonl-лог."""
+    """Рассылка по CSV из пакета: sessions_bind, apis_sessions, proxy.txt RR, без БД."""
     import asyncio
     import zipfile
-    from collections import defaultdict
 
     from rich.console import Console
 
     from src.account_zip_import import import_sessions_zip, print_zip_import_report
     from src.broadcast.bundle import (
-        APIS_SESSIONS_FILENAME,
         discover_campaign_import_slices,
         load_campaign_bundle,
-        parse_apis_sessions_file,
         validate_campaign_bundle,
         validate_extra_import_slices,
     )
+    from src.broadcast.campaign_assign import apply_package_api_proxy_assignments
     from src.broadcast.csv_runner import (
         load_csv_recipients,
         load_sent_user_ids_from_jsonl,
@@ -226,11 +257,7 @@ def _cli_csv_broadcast(
     from src.config import (
         Settings,
         account_session_has_full_api,
-        assign_apis_explicit_to_stems,
-        assign_apis_round_robin_to_accounts,
-        assign_proxies_round_robin_to_accounts,
-        load_api_pairs_from_file,
-        load_proxy_pool_from_file,
+        account_session_has_proxy,
     )
 
     con = Console()
@@ -254,6 +281,7 @@ def _cli_csv_broadcast(
 
     sett = Settings()
     stem_to_apis_file: dict[str, Path] = {}
+    stem_to_proxy_file: dict[str, Path] = {}
     all_imported_order: list[str] = []
 
     def _apply_slice_csv(sl) -> int:
@@ -269,27 +297,8 @@ def _cli_csv_broadcast(
         print_zip_import_report(con, rep)
         for stem in rep.imported_stems:
             stem_to_apis_file[stem] = sl.apis_file
+            stem_to_proxy_file[stem] = sl.proxies_file
             all_imported_order.append(stem)
-        stems = frozenset(rep.imported_stems)
-        proxies = load_proxy_pool_from_file(sl.proxies_file)
-        if not proxies:
-            con.print(f"[red]В {sl.proxies_file.name} нет валидных прокси.[/]")
-            return 1
-        if stems:
-            ok_px, msg_px = assign_proxies_round_robin_to_accounts(
-                sett, proxy_pool=proxies, only_session_names=stems
-            )
-        elif sl.label == "accounts":
-            ok_px, msg_px = assign_proxies_round_robin_to_accounts(sett, proxy_pool=proxies)
-        else:
-            con.print(
-                f"[yellow]{sl.label}: в ZIP не скопировано новых сессий — прокси для слайса не трогаем.[/]"
-            )
-            return 0
-        if not ok_px:
-            con.print(f"[red]{msg_px}[/]")
-            return 1
-        con.print(f"[dim]Прокси ({sl.label}):[/] {msg_px}")
         return 0
 
     for sl in slices:
@@ -304,44 +313,20 @@ def _cli_csv_broadcast(
         )
         return 1
 
-    map_path = root / APIS_SESSIONS_FILENAME
-    mapping, map_errs = parse_apis_sessions_file(map_path)
-    for e in map_errs:
-        con.print(f"[red]{e}[/]")
-    if map_errs:
+    if not apply_package_api_proxy_assignments(
+        console=con,
+        sett=sett,
+        root=root,
+        unique_imported=unique_imported,
+        stem_to_apis_file=stem_to_apis_file,
+        stem_to_proxy_file=stem_to_proxy_file,
+    ):
         return 1
 
-    if mapping:
-        ok_exp, msg_exp = assign_apis_explicit_to_stems(mapping, sett)
-        if not ok_exp:
-            con.print(f"[red]{msg_exp}[/]")
-            return 1
-        con.print(f"[dim]Явное API ({APIS_SESSIONS_FILENAME}):[/] {msg_exp}")
-
-    need_rr_by_file: dict[Path, list[str]] = defaultdict(list)
-    for stem in unique_imported:
-        if not account_session_has_full_api(stem):
-            ap = stem_to_apis_file.get(stem) or bundle.apis_file
-            need_rr_by_file[ap].append(stem)
-
-    for ap_path, stems in need_rr_by_file.items():
-        pairs = load_api_pairs_from_file(ap_path)
-        if not pairs:
-            con.print(
-                f"[red]Для стемов {stems!r} нужен round-robin API, "
-                f"но в {ap_path.name} нет валидных пар api_id:api_hash.[/]"
-            )
-            return 1
-        ok_rr, msg_rr = assign_apis_round_robin_to_accounts(
-            pairs, sett, only_session_names=frozenset(stems)
-        )
-        if not ok_rr:
-            con.print(f"[red]{msg_rr}[/]")
-            return 1
-        con.print(f"[dim]API RR ({ap_path.name}):[/] {msg_rr}")
-
     active_sessions = sorted(
-        {s for s in unique_imported if account_session_has_full_api(s)}
+        s
+        for s in unique_imported
+        if account_session_has_full_api(s) and account_session_has_proxy(s)
     )
     if not active_sessions:
         con.print("[red]После назначения API нет ни одной активной импортированной сессии.[/]")
@@ -486,7 +471,7 @@ def main() -> None:
     parser.add_argument(
         "--broadcast",
         metavar="DIR",
-        help="Рассылка из пакета (accounts.zip, apis.txt, proxies.txt, text_1/2.txt; фото — или --broadcast-text-only)",
+        help="Рассылка из пакета (accounts.zip, apis.txt, proxy.txt/proxies.txt, text_1/2.txt; см. docs/CAMPAIGN_PACKAGE.md)",
     )
     parser.add_argument(
         "--broadcast-limit",

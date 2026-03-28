@@ -1162,6 +1162,49 @@ def account_session_has_full_api(session_name: str) -> bool:
     return bool(row.get("api_id") and row.get("api_hash"))
 
 
+def account_session_has_proxy(session_name: str) -> bool:
+    """У аккаунта задан непустой прокси (не шаблон из документации)."""
+    row = account_row_for_session_name(session_name)
+    if not row:
+        return False
+    p = row.get("proxy")
+    if not p or not str(p).strip():
+        return False
+    return not is_placeholder_proxy_url(str(p))
+
+
+def assign_sessions_bind_to_accounts(
+    entries: list[tuple[tuple[int, str], str, str]],
+    settings: Settings | None = None,
+) -> tuple[bool, str]:
+    """
+    ``sessions_bind.txt``: для каждой строки записать ``api_id``, ``api_hash``, ``proxy``
+    в accounts.json и sidecar.
+    """
+    if not entries:
+        return True, "sessions_bind: нечего назначать"
+    s = settings or Settings()
+    rows = load_accounts_all()
+    by_name: dict[str, dict] = {}
+    for r in rows:
+        if not isinstance(r, dict) or r.get("_template"):
+            continue
+        name = (r.get("session_name") or "").strip()
+        if name:
+            by_name[name] = r
+    for (aid, ahash), proxy_url, stem in entries:
+        row = by_name.get(stem)
+        if not row:
+            return False, f"Нет session_name={stem!r} в accounts.json (импортируйте ZIP)"
+        row["api_id"] = int(aid)
+        row["api_hash"] = str(ahash).strip()
+        row["proxy"] = str(proxy_url).strip()
+        write_api_to_session_sidecar(stem, aid, ahash, s)
+        write_proxy_to_session_sidecar(stem, str(proxy_url).strip(), s)
+    save_accounts_all(rows)
+    return True, str(accounts_json_path())
+
+
 def assign_apis_explicit_to_stems(
     mapping: dict[str, tuple[int, str]],
     settings: Settings | None = None,
