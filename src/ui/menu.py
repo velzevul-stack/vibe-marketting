@@ -522,31 +522,31 @@ def _run_settings_submenu() -> None:
 
 
 def _run_mytelegram_api_placeholder() -> None:
-    """Опциональное получение api с my.telegram.org (фаза 2)."""
+    """Playwright: Telegram Web → пауза → my.telegram.org → запись api_id/api_hash."""
+    from src.mytelegram_portal.runner import run_mytg_menu_flow
+
     console.print()
-    console.print("[bold white]── API my.telegram.org ──[/] [dim](можно пропустить)[/]")
+    console.print("[bold white]── API my.telegram.org (Playwright) ──[/]")
     console.print(
-        "[dim]Автоматический вход на сайт и запись api_id/api_hash (Playwright + код из Telegram) — фаза 2. "
-        "Сейчас: ключи вручную в config или [bold]9 → 2[/] → telethon_default_api.[/]"
+        "[dim]Фаза 1:[/] вход в [cyan]web.telegram.org/k[/] под прокси из accounts.json, "
+        "код из консоли → сохраняется профиль браузера. "
+        "[dim]Фаза 2:[/] [cyan]my.telegram.org[/], код из Web (или вручную) → [cyan]accounts.json[/]. "
+        "Нужны [bold]session_name[/], [bold]phone[/], [bold]proxy[/] у каждой строки. "
+        "См. [bold]mytg_*[/] в settings.json."
     )
-    console.print(f"{_mk('0')} Назад [dim](не регистрировать сейчас)[/]")
-    console.print(f"{_mk('1')} Проверить, установлен ли Playwright [dim](для будущего сценария)[/]")
-    sub = Prompt.ask(
-        "Выбор",
-        choices=["0", "1"],
-        default="0",
-    )
+    console.print(f"{_mk('0')} Назад")
+    console.print(f"{_mk('1')} Только фаза 1 — Telegram Web [dim](storage_state)[/]")
+    console.print(f"{_mk('2')} Только фаза 2 — my.telegram.org [dim](нужен state после фазы 1)[/]")
+    console.print(f"{_mk('3')} Полный цикл [dim](фаза 1 → опц. ожидание → фаза 2)[/]")
+    sub = Prompt.ask("Выбор", choices=["0", "1", "2", "3"], default="0")
     if sub == "0":
         return
+    mode = {"1": "phase1", "2": "phase2", "3": "full"}[sub]
     try:
-        import playwright  # noqa: F401
-    except ImportError:
-        console.print(
-            "[yellow]Playwright не установлен.[/] Для будущей автоматизации: "
-            "[dim]pip install playwright[/] и [dim]playwright install chromium[/]"
-        )
-        return
-    console.print("[dim]Реализация сценария будет добавлена позже.[/]")
+        run_mytg_menu_flow(console, mode=mode)  # type: ignore[arg-type]
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Прервано.[/]")
+    Prompt.ask("\n[dim]Enter — назад[/]", default="")
 
 
 def _run_broadcast_from_bundle_menu() -> None:

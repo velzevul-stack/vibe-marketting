@@ -57,6 +57,20 @@
     "list": []
   },
 
+  "_mytg_comment": "Playwright: Telegram Web + my.telegram.org (меню 9→4). mytg_headless=false снижает детект; на Linux сервере часто xvfb-run.",
+  "mytg_headless": false,
+  "mytg_chromium_channel": null,
+  "mytg_portal_code_timeout_sec": 120,
+  "mytg_create_retry_wait_sec": 1800,
+  "mytg_wait_after_web_sec": 86400,
+  "mytg_delays": {
+    "after_navigate": { "min": 1.5, "max": 4 },
+    "after_click": { "min": 0.8, "max": 2.5 },
+    "after_type": { "min": 0.35, "max": 1.2 },
+    "after_submit": { "min": 2, "max": 5 },
+    "poll_portal_code": { "min": 2, "max": 5 }
+  },
+
   "delays": {
     "join_min": 30,
     "join_max": 120,

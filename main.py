@@ -39,6 +39,19 @@ def _run_startup_session_sync() -> None:
         con.print(f"[red]sync_sessions: {e}[/]")
 
 
+def _cli_mytg(*, phase1: bool, phase2: bool, full: bool, state: str | None) -> int:
+    from pathlib import Path
+
+    from src.mytelegram_portal.runner import run_mytg_cli
+
+    flags = sum(bool(x) for x in (phase1, phase2, full))
+    if flags != 1:
+        return 2
+    mode = "phase1" if phase1 else "phase2" if phase2 else "full"
+    sp = Path(state).expanduser() if state else None
+    return run_mytg_cli(mode=mode, state_path=sp)
+
+
 def _parse_csv_minutes_interval(spec: str, *, flag: str) -> tuple[float, float | None]:
     """
     Одно число минут или ``MIN-MAX`` (случайный uniform между отправками).
@@ -685,6 +698,27 @@ def main() -> None:
         action="store_true",
         help="Вместе с --strip-account-apis: также обнулить telethon_default_api в settings.json",
     )
+    parser.add_argument(
+        "--mytg-phase1",
+        action="store_true",
+        help="Playwright: только вход в Telegram Web и сохранение state (output/mytegram_portal_state.json)",
+    )
+    parser.add_argument(
+        "--mytg-phase2",
+        action="store_true",
+        help="Playwright: только my.telegram.org по сохранённому state",
+    )
+    parser.add_argument(
+        "--mytg-full",
+        action="store_true",
+        help="Playwright: фаза 1 и затем фаза 2 (см. mytg_wait_after_web_sec в settings)",
+    )
+    parser.add_argument(
+        "--mytg-state",
+        metavar="PATH",
+        default=None,
+        help="Путь к mytelegram_portal_state.json (по умолчанию output/mytegram_portal_state.json)",
+    )
     args = parser.parse_args()
     if args.proxy is not None:
         raise SystemExit(_cli_proxy_state(args.proxy))
@@ -738,6 +772,18 @@ def main() -> None:
                 clear_proxies=args.clear_proxies,
             )
         )
+    if args.mytg_phase1 or args.mytg_phase2 or args.mytg_full:
+        code = _cli_mytg(
+            phase1=args.mytg_phase1,
+            phase2=args.mytg_phase2,
+            full=args.mytg_full,
+            state=args.mytg_state,
+        )
+        if code == 2:
+            parser.error(
+                "Укажите ровно один из флагов: --mytg-phase1, --mytg-phase2, --mytg-full"
+            )
+        raise SystemExit(code)
     run_menu()
 
 

@@ -236,6 +236,68 @@ class Settings:
         except (TypeError, ValueError):
             self.broadcast_session_interval_max_sec = None
 
+        # Playwright: my.telegram.org + Telegram Web (меню 9→4)
+        _mytg = self._data.get("mytg_delays")
+        if not isinstance(_mytg, dict):
+            _mytg = {}
+
+        def _mytg_pair(key: str, dmin: float, dmax: float) -> tuple[float, float]:
+            b = _mytg.get(key)
+            if not isinstance(b, dict):
+                b = {}
+            try:
+                lo = float(b.get("min", dmin))
+                hi = float(b.get("max", dmax))
+            except (TypeError, ValueError):
+                lo, hi = dmin, dmax
+            if hi < lo:
+                lo, hi = dmin, dmax
+            return (lo, hi)
+
+        (
+            self.mytg_after_navigate_min,
+            self.mytg_after_navigate_max,
+        ) = _mytg_pair("after_navigate", 1.5, 4.0)
+        (
+            self.mytg_after_click_min,
+            self.mytg_after_click_max,
+        ) = _mytg_pair("after_click", 0.8, 2.5)
+        (
+            self.mytg_after_type_min,
+            self.mytg_after_type_max,
+        ) = _mytg_pair("after_type", 0.35, 1.2)
+        (
+            self.mytg_after_submit_min,
+            self.mytg_after_submit_max,
+        ) = _mytg_pair("after_submit", 2.0, 5.0)
+        (
+            self.mytg_poll_portal_code_min,
+            self.mytg_poll_portal_code_max,
+        ) = _mytg_pair("poll_portal_code", 2.0, 5.0)
+        try:
+            self.mytg_portal_code_timeout_sec: float = max(
+                10.0, float(self._data.get("mytg_portal_code_timeout_sec", 120.0))
+            )
+        except (TypeError, ValueError):
+            self.mytg_portal_code_timeout_sec = 120.0
+        try:
+            self.mytg_create_retry_wait_sec: float = max(
+                60.0, float(self._data.get("mytg_create_retry_wait_sec", 1800.0))
+            )
+        except (TypeError, ValueError):
+            self.mytg_create_retry_wait_sec = 1800.0
+        self.mytg_headless: bool = bool(self._data.get("mytg_headless", False))
+        _ch = self._data.get("mytg_chromium_channel")
+        self.mytg_chromium_channel: str | None = (
+            str(_ch).strip() if _ch and str(_ch).strip() else None
+        )
+        try:
+            self.mytg_wait_after_web_sec: float = max(
+                0.0, float(self._data.get("mytg_wait_after_web_sec", 86400.0))
+            )
+        except (TypeError, ValueError):
+            self.mytg_wait_after_web_sec = 86400.0
+
 
 def clone_settings(**overrides) -> Settings:
     """Копия настроек из settings.json с подменой верхнеуровневых ключей (один прогон меню)."""
