@@ -10,5 +10,6 @@ config/settings.json
 config/proxies.txt
 config/session_bind.txt
 config/groups.txt
+config/ignor_list.txt
 __pycache__/
 *.pyc
