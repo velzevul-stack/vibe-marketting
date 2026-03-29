@@ -87,7 +87,8 @@ def _cli_broadcast(
     broadcast_mode: str,
     *,
     send_media: bool = True,
-    account_gap_minutes: float | None = None,
+    broadcast_delay_spec: str | None = None,
+    broadcast_account_gap_spec: str | None = None,
 ) -> int:
     """Рассылка из каталога-пакета без меню (ZIP, apis.txt, proxy.txt, sessions_bind и т.д.)."""
     import asyncio
@@ -214,11 +215,41 @@ def _cli_broadcast(
 
     cat_val = None if category == "all" else category
     mode = "privacy_retry" if broadcast_mode == "privacy_retry" else "normal"
-    gap_sec_cli = (
-        max(0.0, float(account_gap_minutes) * 60.0)
-        if account_gap_minutes is not None
-        else None
-    )
+
+    session_interval_seconds: float | None = None
+    session_interval_max_seconds: float | None = None
+    if broadcast_delay_spec is not None:
+        try:
+            sd_lo, sd_hi = _parse_csv_minutes_interval(
+                broadcast_delay_spec, flag="--broadcast-delay-minutes"
+            )
+        except ValueError as e:
+            con.print(f"[red]{e}[/]")
+            return 1
+        session_interval_seconds = max(0.0, sd_lo * 60.0)
+        session_interval_max_seconds = (
+            None if sd_hi is None else max(session_interval_seconds, sd_hi * 60.0)
+        )
+
+    account_gap_seconds: float | None = None
+    account_gap_max_seconds: float | None = None
+    if broadcast_account_gap_spec is not None:
+        gs = broadcast_account_gap_spec.strip()
+        if gs in ("0", "0.0"):
+            account_gap_seconds = 0.0
+            account_gap_max_seconds = None
+        else:
+            try:
+                g_lo, g_hi = _parse_csv_minutes_interval(
+                    gs, flag="--broadcast-account-gap-minutes"
+                )
+            except ValueError as e:
+                con.print(f"[red]{e}[/]")
+                return 1
+            account_gap_seconds = max(0.0, g_lo * 60.0)
+            account_gap_max_seconds = (
+                None if g_hi is None else max(account_gap_seconds, g_hi * 60.0)
+            )
 
     async def _run():
         return await run_dm_broadcast(
@@ -231,7 +262,10 @@ def _cli_broadcast(
             exclude_invited=True,
             broadcast_mode=mode,
             send_media=send_media,
-            account_gap_seconds=gap_sec_cli,
+            account_gap_seconds=account_gap_seconds,
+            account_gap_max_seconds=account_gap_max_seconds,
+            session_interval_seconds=session_interval_seconds,
+            session_interval_max_seconds=session_interval_max_seconds,
         )
 
     totals = asyncio.run(_run())
@@ -568,11 +602,18 @@ def main() -> None:
         help="Рассылка без вложений: только text_1/2.txt (без 1.jpg–3.jpg)",
     )
     parser.add_argument(
-        "--broadcast-account-gap-minutes",
-        type=float,
+        "--broadcast-delay-minutes",
+        type=str,
         default=None,
         metavar="M",
-        help="Мин. минут между успешными ЛС внутри одной пары api_id:api_hash (0=выкл; иначе settings)",
+        help="Пауза сессии (БД): минуты или MIN-MAX; после входа и между попытками; иначе settings",
+    )
+    parser.add_argument(
+        "--broadcast-account-gap-minutes",
+        type=str,
+        default=None,
+        metavar="M",
+        help="Между попытками внутри API-группы: минуты или MIN-MAX; 0=выкл; иначе settings",
     )
     parser.add_argument(
         "--csv-broadcast",
@@ -669,7 +710,8 @@ def main() -> None:
                 args.broadcast_zip_conflict,
                 args.broadcast_mode,
                 send_media=not args.broadcast_text_only,
-                account_gap_minutes=args.broadcast_account_gap_minutes,
+                broadcast_delay_spec=args.broadcast_delay_minutes,
+                broadcast_account_gap_spec=args.broadcast_account_gap_minutes,
             )
         )
     if args.csv_broadcast or args.csv_recipients or args.csv_skip_sent:

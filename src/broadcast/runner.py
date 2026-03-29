@@ -35,7 +35,7 @@ from telethon.errors import (
 
 from src.broadcast.bundle import CampaignBundle, read_campaign_texts
 from src.broadcast.ignore_list import load_username_ignore_set, user_dict_username_normalized
-from src.broadcast.send_pacing import GlobalAccountSendGap
+from src.broadcast.send_pacing import CsvSendPacer
 from src.broadcast.media_precache import precache_campaign_images
 from src.broadcast.text_jitter import apply_caption_homoglyph
 from src.config import (
@@ -194,6 +194,9 @@ async def run_dm_broadcast(
     fixed_session_label: str | None = None,
     disconnect_fixed_client: bool = True,
     account_gap_seconds: float | None = None,
+    account_gap_max_seconds: float | None = None,
+    session_interval_seconds: float | None = None,
+    session_interval_max_seconds: float | None = None,
 ) -> BroadcastTotals:
     """
     Общая asyncio.Queue получателей; при флуде/лимите суток и т.п. задача возвращается в пул
@@ -204,9 +207,10 @@ async def run_dm_broadcast(
     no_proxy — не использовать прокси при создании клиента из пула (для «один аккаунт без прокси»).
     fixed_client + fixed_session_label — один заранее подключённый клиент (отдельный вход);
     при disconnect_fixed_client=False отключение остаётся на вызывающей стороне.
-    account_gap_seconds — минимум секунд между успешными отправками **внутри одной пары**
-    api_id/api_hash (разные приложения Telegram — независимые очереди);
-    None — взять из settings.broadcast_min_gap_between_accounts_sec; 0 — выкл.
+    ``account_gap_seconds`` / ``account_gap_max_seconds`` — пауза между **попытками** (OK, skip, relay
+    с resolve) внутри одной API-группы; None — из settings (+ опциональный max).
+    ``session_interval_seconds`` / ``session_interval_max_seconds`` — пауза **сессии** (как CSV delay):
+    после входа до precache, между попытками; None — из settings.
     """
     await db.init()
     texts = read_campaign_texts(bundle)
@@ -298,14 +302,45 @@ async def run_dm_broadcast(
     _bc_label = fixed_label
     _bc_own_disc = disconnect_fixed_client
     _broadcast_no_proxy = bool(no_proxy)
+    _api_by_sn, _stagger_by_sn = stagger_index_by_api_group(list(session_names))
+
+    _s_own_min = max(
+        0.0,
+        float(session_interval_seconds)
+        if session_interval_seconds is not None
+        else float(settings.broadcast_session_interval_sec),
+    )
+    _s_own_max = (
+        session_interval_max_seconds
+        if session_interval_max_seconds is not None
+        else settings.broadcast_session_interval_max_sec
+    )
+    if _s_own_max is not None:
+        _s_own_max = max(0.0, float(_s_own_max))
+
     _gap_raw = (
         float(account_gap_seconds)
         if account_gap_seconds is not None
         else float(settings.broadcast_min_gap_between_accounts_sec)
     )
-    _gap_sec = 0.0 if fixed_client is not None else max(0.0, _gap_raw)
-    global_send_gap = GlobalAccountSendGap(_gap_sec)
-    _api_by_sn, _stagger_by_sn = stagger_index_by_api_group(list(session_names))
+    _g_min = 0.0 if fixed_client is not None else max(0.0, _gap_raw)
+    _g_max = None if fixed_client is not None else (
+        float(account_gap_max_seconds)
+        if account_gap_max_seconds is not None
+        else settings.broadcast_min_gap_between_accounts_max_sec
+    )
+    if _g_max is not None:
+        _g_max = max(0.0, float(_g_max))
+        _g_max = max(_g_min, _g_max)
+
+    dm_pacer = CsvSendPacer(
+        own_interval_sec=_s_own_min,
+        account_gap_sec=_g_min,
+        own_interval_max_sec=_s_own_max,
+        account_gap_max_sec=_g_max,
+        session_api_group=_api_by_sn,
+    )
+    _legacy_smart_delay = _s_own_min <= 0.0 and _g_min <= 0.0
     work_q: asyncio.Queue = asyncio.Queue()
     for u in users:
         await work_q.put(_WorkItem(user=u, tried=frozenset()))
@@ -489,7 +524,7 @@ async def run_dm_broadcast(
         progress: Progress,
         task_id: int,
         worker_index: int,
-        api_group_key: str,
+        _api_group_key: str,
         api_stagger_index: int,
     ) -> None:
         client = pool.get_client(session_name, settings=settings)
@@ -526,6 +561,13 @@ async def run_dm_broadcast(
                 await _degraded_relay_loop(session_name, progress, task_id)
                 return
 
+            _pause_login = await dm_pacer.wait_after_connect_before_broadcast()
+            if _pause_login >= 0.05:
+                await _log(
+                    f"  [dim]после входа[/] {escape(session_name)}: пауза "
+                    f"[white]{_pause_login:.0f}[/]s перед precache/рассылкой"
+                )
+
             cached_handles: tuple[object, object, object] | None = None
             if send_media and settings.broadcast_precache_media_to_saved:
                 await _set_worker_status(session_name, "precache медиа…")
@@ -555,8 +597,9 @@ async def run_dm_broadcast(
             elif send_media:
                 cached_handles = None
 
-            if global_send_gap.gap_sec > 0:
-                await asyncio.sleep(api_stagger_index * global_send_gap.gap_sec)
+            dm_pacer.mark_session_ready_after_precache(
+                session_name, stagger_index=api_stagger_index
+            )
 
             while True:
                 await _set_worker_status(session_name, "ожидание задачи")
@@ -625,7 +668,7 @@ async def run_dm_broadcast(
                         await _try_requeue(u, tried, session_name, preview, progress, task_id)
                         continue
 
-                await global_send_gap.wait_my_turn(api_group_key)
+                await dm_pacer.wait_before_send(session_name)
 
                 async def _reconnect_client_3x(reason: str) -> bool:
                     for attempt in range(1, _DISCONNECT_RECONNECT_ATTEMPTS + 1):
@@ -676,6 +719,7 @@ async def run_dm_broadcast(
                         )
                         await _add_totals(session_name, skipped=1)
                         await _finalize_user(progress, task_id)
+                        await dm_pacer.mark_recipient_attempt_done(session_name)
                         return
                     if send_media:
                         assert img_path is not None
@@ -695,7 +739,7 @@ async def run_dm_broadcast(
                         f"  [green]OK[/] [dim]{escape(session_name)}[/] → [white]{escape(preview)}[/]"
                     )
                     await _add_totals(session_name, sent=1)
-                    await global_send_gap.mark_success(api_group_key)
+                    await dm_pacer.mark_recipient_attempt_done(session_name)
                     await _finalize_user(progress, task_id)
 
                 async def _try_send_resilient() -> None:
@@ -755,7 +799,9 @@ async def run_dm_broadcast(
                                 except Exception:
                                     pass
                                 await _set_worker_status(session_name, "retired (PeerFlood)")
+                                await dm_pacer.mark_recipient_attempt_done(session_name)
                                 return "exit_worker"
+                        await dm_pacer.mark_recipient_attempt_done(session_name)
                         return "continue_outer"
                     except Exception as e2:
                         if uid is not None and is_username_missing_telegram_error(e2):
@@ -767,6 +813,7 @@ async def run_dm_broadcast(
                             )
                             await _add_totals(session_name, skipped=1, username_nf=1)
                             await _finalize_user(progress, task_id)
+                            await dm_pacer.mark_recipient_attempt_done(session_name)
                             return "continue_outer"
                         await _log(
                             f"  [yellow]relay[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
@@ -775,6 +822,7 @@ async def run_dm_broadcast(
                         await _try_requeue(
                             u, tried, session_name, preview, progress, task_id
                         )
+                        await dm_pacer.mark_recipient_attempt_done(session_name)
                         return "continue_outer"
 
                 try:
@@ -836,6 +884,7 @@ async def run_dm_broadcast(
                             await _try_requeue(
                                 u, tried, session_name, preview, progress, task_id
                             )
+                            await dm_pacer.mark_recipient_attempt_done(session_name)
                             continue
                     except PeerFloodError as e:
                         pr = await _peer_flood_after(e)
@@ -852,6 +901,7 @@ async def run_dm_broadcast(
                         )
                         await _add_totals(session_name, privacy=1)
                         await _finalize_user(progress, task_id)
+                        await dm_pacer.mark_recipient_attempt_done(session_name)
                     except (UsernameNotOccupiedError, UsernameInvalidError) as e:
                         if uid is not None:
                             await db.mark_username_not_found(int(uid))
@@ -864,6 +914,7 @@ async def run_dm_broadcast(
                             f"{escape(_err_tag(e))}: {_err_detail(e)}"
                         )
                         await _finalize_user(progress, task_id)
+                        await dm_pacer.mark_recipient_attempt_done(session_name)
                     except (
                         UserIsBlockedError,
                         PeerIdInvalidError,
@@ -876,6 +927,7 @@ async def run_dm_broadcast(
                         )
                         await _add_totals(session_name, skipped=1)
                         await _finalize_user(progress, task_id)
+                        await dm_pacer.mark_recipient_attempt_done(session_name)
                     except ValueError as e:
                         un_m = (
                             uid is not None and is_username_missing_telegram_error(e)
@@ -891,6 +943,7 @@ async def run_dm_broadcast(
                             session_name, skipped=1, username_nf=1 if un_m else 0
                         )
                         await _finalize_user(progress, task_id)
+                        await dm_pacer.mark_recipient_attempt_done(session_name)
                     except RPCError as e:
                         if uid is not None and is_username_missing_telegram_error(e):
                             await db.mark_username_not_found(int(uid))
@@ -900,6 +953,7 @@ async def run_dm_broadcast(
                             )
                             await _add_totals(session_name, skipped=1, username_nf=1)
                             await _finalize_user(progress, task_id)
+                            await dm_pacer.mark_recipient_attempt_done(session_name)
                         else:
                             await _log(
                                 f"  [yellow]relay[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
@@ -908,6 +962,7 @@ async def run_dm_broadcast(
                             await _try_requeue(
                                 u, tried, session_name, preview, progress, task_id
                             )
+                            await dm_pacer.mark_recipient_attempt_done(session_name)
                             continue
                     except Exception as e:
                         if uid is not None and is_username_missing_telegram_error(e):
@@ -918,6 +973,7 @@ async def run_dm_broadcast(
                             )
                             await _add_totals(session_name, skipped=1, username_nf=1)
                             await _finalize_user(progress, task_id)
+                            await dm_pacer.mark_recipient_attempt_done(session_name)
                         else:
                             await _log(
                                 f"  [yellow]relay[/] [dim]{escape(session_name)}[/] {escape(preview)} — "
@@ -926,13 +982,15 @@ async def run_dm_broadcast(
                             await _try_requeue(
                                 u, tried, session_name, preview, progress, task_id
                             )
+                            await dm_pacer.mark_recipient_attempt_done(session_name)
                             continue
                 except _DegradedExit:
                     return
 
-                await asyncio.sleep(
-                    smart_delay(settings.delay_broadcast_min, settings.delay_broadcast_max)
-                )
+                if _legacy_smart_delay:
+                    await asyncio.sleep(
+                        smart_delay(settings.delay_broadcast_min, settings.delay_broadcast_max)
+                    )
         finally:
             if _bc_fixed is not None and not _bc_own_disc:
                 pass
@@ -941,6 +999,22 @@ async def run_dm_broadcast(
                     await client.disconnect()
                 except Exception:
                     pass
+
+    def _fmt_sec_rng(lo: float, hi: float | None) -> str:
+        if hi is None or abs(hi - lo) < 0.05:
+            return f"{lo:.0f}s"
+        return f"{lo:.0f}–{hi:.0f}s"
+
+    _pace_log_sess = (
+        f", пауза/сессия [white]{_fmt_sec_rng(_s_own_min, _s_own_max)}[/]"
+        if _s_own_min > 0
+        else ""
+    )
+    _pace_log_api = (
+        f", по API-группе [white]{_fmt_sec_rng(_g_min, _g_max)}[/]"
+        if _g_min > 0
+        else ""
+    )
 
     mode_label = "повтор privacy" if broadcast_mode == "privacy_retry" else "обычная"
     with Progress(
@@ -966,11 +1040,6 @@ async def run_dm_broadcast(
             _proxy_tail += " [dim](клиент: отдельный вход)[/]"
         elif no_proxy:
             _proxy_tail += " [dim](эта рассылка: без прокси)[/]"
-        _gap_tail = (
-            f", зазор [white]{_gap_sec:.0f}[/]s [dim]на группу api_id:api_hash (+ сдвиг старта внутри группы)[/]"
-            if _gap_sec > 0
-            else ""
-        )
         await _log(
             f"[bold]Старт рассылки[/] ([dim]{escape(mode_label)}[/]): аккаунтов [white]{n_acc}[/], "
             f"получателей [white]{len(users)}[/], лимит/акк/сутки UTC: [white]{daily_limit or '—'}[/], "
@@ -978,7 +1047,7 @@ async def run_dm_broadcast(
             f"retire после PeerFlood: [white]{retire_after}[/], "
             f"[dim]PeerFlood — пауза по той же лестнице, что FloodWait (без секунд из RPC)[/], "
             f"{media_part}, "
-            f"прокси: {_proxy_tail}{_gap_tail}"
+            f"прокси: {_proxy_tail}{_pace_log_sess}{_pace_log_api}"
         )
         await _log("[dim]Ниже таблица статусов аккаунтов обновляется ~1 с.[/]")
 

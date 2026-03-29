@@ -202,6 +202,39 @@ class Settings:
             self.broadcast_min_gap_between_accounts_sec = 300.0
         if self.broadcast_min_gap_between_accounts_sec < 0:
             self.broadcast_min_gap_between_accounts_sec = 0.0
+        # Макс. секунд между попытками внутри API-группы (рассылка из БД); None — фиксированный зазор = min
+        _gmax = self._data.get("broadcast_min_gap_between_accounts_max_sec")
+        try:
+            self.broadcast_min_gap_between_accounts_max_sec: float | None = (
+                None
+                if _gmax is None or _gmax == ""
+                else max(
+                    float(self.broadcast_min_gap_between_accounts_sec),
+                    float(_gmax),
+                )
+            )
+        except (TypeError, ValueError):
+            self.broadcast_min_gap_between_accounts_max_sec = None
+        # Пауза одной сессии между попытками к получателям (БД), сек.; 0 — только меж-API зазор
+        try:
+            _bsi = self._data.get("broadcast_session_interval_sec", 1800)
+            self.broadcast_session_interval_sec: float = max(
+                0.0, float(_bsi if _bsi is not None else 0)
+            )
+        except (TypeError, ValueError):
+            self.broadcast_session_interval_sec = 1800.0
+        _bsim = self._data.get("broadcast_session_interval_max_sec")
+        try:
+            self.broadcast_session_interval_max_sec: float | None = (
+                None
+                if _bsim is None or _bsim == ""
+                else max(
+                    self.broadcast_session_interval_sec,
+                    float(_bsim),
+                )
+            )
+        except (TypeError, ValueError):
+            self.broadcast_session_interval_max_sec = None
 
 
 def clone_settings(**overrides) -> Settings:
