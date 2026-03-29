@@ -43,8 +43,8 @@ class GlobalAccountSendGap:
 
 class CsvSendPacer:
     """
-    Для CSV: пауза между отправками одной сессии (фиксированная или ``uniform(min,max)``),
-    и между успешными ЛС **в пределах одной группы API** — отдельный интервал (фикс. или случайный).
+    Для CSV: пауза между **попытками к получателю** одной сессии (OK, skip, fail после resolve),
+    и между такими попытками **в пределах одной группы API** — отдельный интервал (фикс. или случайный).
     """
 
     def __init__(
@@ -93,12 +93,22 @@ class CsvSendPacer:
             return self._gap_min
         return random.uniform(self._gap_min, self._gap_max)
 
+    async def wait_after_connect_before_broadcast(self) -> float:
+        """
+        Полная пауза «интервала сессии`` после успешного входа, до precache и рассылки.
+        Возвращает фактически выдержанные секунды (для лога).
+        """
+        sec = self._sample_own()
+        if sec >= 0.05:
+            await asyncio.sleep(sec)
+        return sec
+
     def mark_session_ready_after_precache(
         self, session_name: str, *, stagger_index: int = 0
     ) -> None:
         """
-        Первое ЛС не раньше ``base + stagger_index * min_gap`` (индекс — внутри своей API-группы).
-        После успеха дедлайны сдвигаются на случайные/фиксированные интервалы.
+        После precache: первое ``wait_before_send`` учитывает только сдвиг внутри API-группы
+        (полная пауза уже была после входа — ``wait_after_connect_before_broadcast``).
         """
         base = time.monotonic()
         si = max(0, int(stagger_index))
@@ -119,9 +129,17 @@ class CsvSendPacer:
                 return
             await asyncio.sleep(wait)
 
-    async def mark_sent(self, session_name: str) -> None:
+    async def mark_recipient_attempt_done(self, session_name: str) -> None:
+        """
+        После успешной отправки, skip (нет peer / RPC) или окончательного fail —
+        сдвинуть паузы сессии и API-группы (чтобы не долбить Telegram подряд при серии skip).
+        """
         async with self._lock:
             t = time.monotonic()
             self._deadline_own[session_name] = t + self._sample_own()
             ak = self._api_key(session_name)
             self._deadline_glob[ak] = t + self._sample_gap()
+
+    async def mark_sent(self, session_name: str) -> None:
+        """Совместимость: то же, что ``mark_recipient_attempt_done``."""
+        await self.mark_recipient_attempt_done(session_name)

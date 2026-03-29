@@ -202,10 +202,11 @@ async def run_csv_dm_broadcast(
 ) -> BroadcastTotals:
     """
     Параллельные воркеры (один на сессию), очередь получателей только у своей сессии.
-    ``delay_seconds`` / ``delay_max_seconds`` — пауза между отправками одной сессии (фикс. или
-    случайный uniform); после precache первое окно сдвигается по индексу внутри API-группы.
-    ``account_gap_seconds`` / ``account_gap_max_seconds`` — интервал между успешными ЛС **внутри одной
-    пары** api_id/api_hash (разные приложения — независимые очереди).
+    ``delay_seconds`` / ``delay_max_seconds`` — тот же интервал: (1) полная пауза **сразу после входа**
+    до precache/рассылки; (2) между попытками к получателю (OK, skip, fail). После precache к первому
+    получателю добавляется только сдвиг внутри API-группы.
+    ``account_gap_seconds`` / ``account_gap_max_seconds`` — то же **между попытками** внутри одной пары
+    api_id/api_hash.
     """
     texts = read_campaign_texts(bundle)
     images = bundle.image_paths
@@ -297,6 +298,12 @@ async def run_csv_dm_broadcast(
                 if n:
                     await _add_totals(session_name, failed=n)
                 return
+
+            _pause_login = await pacer.wait_after_connect_before_broadcast()
+            await _log(
+                f"  [dim]после входа[/] {escape(session_name)}: пауза [white]{_pause_login:.0f}[/]s "
+                f"перед precache/рассылкой"
+            )
 
             cached_handles: tuple[object, object, object] | None = None
             if send_media and settings.broadcast_precache_media_to_saved:
@@ -407,10 +414,8 @@ async def run_csv_dm_broadcast(
                     try:
                         outcome = await _send_with_reconnect()
                         user_finished = True
-                        if outcome == "sent":
-                            await pacer.mark_sent(session_name)
+                        await pacer.mark_recipient_attempt_done(session_name)
                     except FloodWaitError as e_fw:
-                        send_ok = False
                         for _ in range(_MAX_FLOOD_WAIT_ROUNDS):
                             sec = max(
                                 flood_wait_seconds(e_fw),
@@ -423,6 +428,7 @@ async def run_csv_dm_broadcast(
                                     "нет секунд, пропуск"
                                 )
                                 await _add_totals(session_name, skipped=1)
+                                await pacer.mark_recipient_attempt_done(session_name)
                                 user_finished = True
                                 break
                             pool.mark_flood_wait(session_name, sec)
@@ -437,9 +443,7 @@ async def run_csv_dm_broadcast(
                                 o2 = await _send_with_reconnect()
                                 if o2 in ("sent", "skipped", "fail_conn"):
                                     user_finished = True
-                                    send_ok = o2 == "sent"
-                                    if o2 == "sent":
-                                        await pacer.mark_sent(session_name)
+                                    await pacer.mark_recipient_attempt_done(session_name)
                                 break
                             except FloodWaitError as e2:
                                 e_fw = e2
@@ -451,6 +455,7 @@ async def run_csv_dm_broadcast(
                             "FloodWait исчерпан"
                         )
                         await _add_totals(session_name, skipped=1)
+                        await pacer.mark_recipient_attempt_done(session_name)
                         user_finished = True
                     except PeerFloodError as e_pf:
                         peer_round += 1
@@ -460,6 +465,7 @@ async def run_csv_dm_broadcast(
                                 f"PeerFlood ×{_MAX_PEER_FLOOD_ROUNDS_SAME_USER}"
                             )
                             await _add_totals(session_name, skipped=1)
+                            await pacer.mark_recipient_attempt_done(session_name)
                             user_finished = True
                             break
                         sec = _broadcast_flood_floor_for_index(peer_round - 1)
@@ -479,6 +485,7 @@ async def run_csv_dm_broadcast(
                             f"  [yellow]privacy[/] {escape(session_name)} {escape(preview)}"
                         )
                         await _add_totals(session_name, skipped=1)
+                        await pacer.mark_recipient_attempt_done(session_name)
                         user_finished = True
                     except (UsernameNotOccupiedError, UsernameInvalidError) as e:
                         await _log(
@@ -486,6 +493,7 @@ async def run_csv_dm_broadcast(
                             f"{_err_tag(e)}: {_err_detail(e)}"
                         )
                         await _add_totals(session_name, skipped=1)
+                        await pacer.mark_recipient_attempt_done(session_name)
                         user_finished = True
                     except (
                         UserIsBlockedError,
@@ -498,6 +506,7 @@ async def run_csv_dm_broadcast(
                             f"{_err_tag(e)}: {_err_detail(e)}"
                         )
                         await _add_totals(session_name, skipped=1)
+                        await pacer.mark_recipient_attempt_done(session_name)
                         user_finished = True
                     except RPCError as e:
                         if is_username_missing_telegram_error(e):
@@ -512,6 +521,7 @@ async def run_csv_dm_broadcast(
                                 f"RPC: {_err_detail(e)}"
                             )
                             await _add_totals(session_name, failed=1)
+                        await pacer.mark_recipient_attempt_done(session_name)
                         user_finished = True
                     except Exception as e:
                         if is_username_missing_telegram_error(e):
@@ -526,6 +536,7 @@ async def run_csv_dm_broadcast(
                                 f"{_err_tag(e)}: {_err_detail(e)}"
                             )
                             await _add_totals(session_name, failed=1)
+                        await pacer.mark_recipient_attempt_done(session_name)
                         user_finished = True
 
         finally:
