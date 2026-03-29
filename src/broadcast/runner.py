@@ -34,6 +34,7 @@ from telethon.errors import (
 )
 
 from src.broadcast.bundle import CampaignBundle, read_campaign_texts
+from src.broadcast.ignore_list import load_username_ignore_set, user_dict_username_normalized
 from src.broadcast.send_pacing import GlobalAccountSendGap
 from src.broadcast.media_precache import precache_campaign_images
 from src.broadcast.text_jitter import apply_caption_homoglyph
@@ -238,6 +239,19 @@ async def run_dm_broadcast(
     )
     if not users:
         console.print("[yellow]Нет получателей (категория / лимит / фильтры рассылки).[/]")
+        return BroadcastTotals()
+
+    _ign = load_username_ignore_set(campaign_root=bundle.root)
+    if _ign:
+        _n_before = len(users)
+        users = [u for u in users if user_dict_username_normalized(u) not in _ign]
+        _n_skip = _n_before - len(users)
+        if _n_skip:
+            console.print(
+                f"[dim]ignor_list:[/] пропущено записей из БД: [yellow]{_n_skip}[/]"
+            )
+    if not users:
+        console.print("[yellow]Нет получателей после фильтра ignor_list.[/]")
         return BroadcastTotals()
 
     pool = AccountPool()

@@ -279,6 +279,7 @@ def _cli_csv_broadcast(
         load_sent_user_ids_from_jsonl,
         run_csv_dm_broadcast,
     )
+    from src.broadcast.ignore_list import load_username_ignore_set
     from src.config import (
         Settings,
         account_session_has_full_api,
@@ -359,7 +360,17 @@ def _cli_csv_broadcast(
 
     skip_ids = load_sent_user_ids_from_jsonl(log_path) if skip_sent else frozenset()
     csv_p = Path(csv_path).expanduser().resolve()
-    loaded = load_csv_recipients(csv_p, limit=csv_limit, skip_user_ids=skip_ids)
+    _ign_users = load_username_ignore_set(campaign_root=root)
+    loaded = load_csv_recipients(
+        csv_p,
+        limit=csv_limit,
+        skip_user_ids=skip_ids,
+        ignore_usernames=_ign_users,
+    )
+    if loaded.skipped_ignore_list:
+        con.print(
+            f"[dim]ignor_list:[/] пропущено строк CSV: [yellow]{loaded.skipped_ignore_list}[/]"
+        )
     for w in loaded.warnings[:30]:
         con.print(f"[yellow]{w}[/]")
     if not loaded.users:

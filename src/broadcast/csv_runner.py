@@ -100,6 +100,7 @@ def _row_get(row: dict[str, str], *candidates: str) -> str:
 class CsvLoadResult:
     users: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    skipped_ignore_list: int = 0
 
 
 def load_csv_recipients(
@@ -107,10 +108,12 @@ def load_csv_recipients(
     *,
     limit: int | None,
     skip_user_ids: frozenset[str],
+    ignore_usernames: frozenset[str] | None = None,
 ) -> CsvLoadResult:
     """
     CSV с колонками вроде ``User ID``, ``Username`` (регистр и пробелы в заголовке не важны).
     Возвращает ``users`` как dict с ключами ``telegram_id``, ``username`` (для ``_resolve_peer``).
+    ``ignore_usernames`` — нижний регистр без ``@``; строка пропускается, если username в списке.
     """
     out = CsvLoadResult()
     p = Path(path)
@@ -139,6 +142,14 @@ def load_csv_recipients(
                     continue
                 seen.add(dedupe)
                 if uid and uid in skip_user_ids:
+                    continue
+                un_norm = username.lstrip("@").lower() if username else ""
+                if (
+                    ignore_usernames
+                    and un_norm
+                    and un_norm in ignore_usernames
+                ):
+                    out.skipped_ignore_list += 1
                     continue
                 out.users.append(
                     {
