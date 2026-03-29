@@ -38,6 +38,8 @@
   "broadcast_retire_session_after_peer_floods": 2,
   "_broadcast_precache_comment": "true: перед прогоном залить три картинки в Избранное и слать ЛС по кэшу медиа; false — каждый раз с диска",
   "broadcast_precache_media_to_saved": true,
+  "_broadcast_gap_comment": "Секунды между успешными ЛС с разных аккаунтов (рассылка из БД и CSV); 0 = без межаккаунтного зазора. CLI: --broadcast-account-gap-minutes / --csv-account-gap-minutes",
+  "broadcast_min_gap_between_accounts_sec": 300,
 
   "telethon_default_api": {
     "_comment": "Для автопривязки .session (меню сессий → 4): общий api_id/api_hash с my.telegram.org",

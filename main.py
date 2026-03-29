@@ -70,6 +70,7 @@ def _cli_broadcast(
     broadcast_mode: str,
     *,
     send_media: bool = True,
+    account_gap_minutes: float | None = None,
 ) -> int:
     """Рассылка из каталога-пакета без меню (ZIP, apis.txt, proxy.txt, sessions_bind и т.д.)."""
     import asyncio
@@ -196,6 +197,11 @@ def _cli_broadcast(
 
     cat_val = None if category == "all" else category
     mode = "privacy_retry" if broadcast_mode == "privacy_retry" else "normal"
+    gap_sec_cli = (
+        max(0.0, float(account_gap_minutes) * 60.0)
+        if account_gap_minutes is not None
+        else None
+    )
 
     async def _run():
         return await run_dm_broadcast(
@@ -208,6 +214,7 @@ def _cli_broadcast(
             exclude_invited=True,
             broadcast_mode=mode,
             send_media=send_media,
+            account_gap_seconds=gap_sec_cli,
         )
 
     totals = asyncio.run(_run())
@@ -234,6 +241,7 @@ def _cli_csv_broadcast(
     send_media: bool = True,
     sent_log: str | None = None,
     skip_sent: bool = False,
+    csv_account_gap_minutes: float | None = None,
 ) -> int:
     """Рассылка по CSV из пакета: sessions_bind, apis_sessions, proxy.txt RR, без БД."""
     import asyncio
@@ -342,6 +350,10 @@ def _cli_csv_broadcast(
         return 1
 
     delay_sec = max(0.0, float(delay_minutes) * 60.0)
+    if csv_account_gap_minutes is not None:
+        csv_gap_sec = max(0.0, float(csv_account_gap_minutes) * 60.0)
+    else:
+        csv_gap_sec = max(0.0, float(sett.broadcast_min_gap_between_accounts_sec))
 
     async def _run():
         return await run_csv_dm_broadcast(
@@ -353,6 +365,7 @@ def _cli_csv_broadcast(
             delay_seconds=delay_sec,
             send_media=send_media,
             sent_log_path=log_path,
+            account_gap_seconds=csv_gap_sec,
         )
 
     totals = asyncio.run(_run())
@@ -503,6 +516,13 @@ def main() -> None:
         help="Рассылка без вложений: только text_1/2.txt (без 1.jpg–3.jpg)",
     )
     parser.add_argument(
+        "--broadcast-account-gap-minutes",
+        type=float,
+        default=None,
+        metavar="M",
+        help="Мин. минут между успешными ЛС с разных аккаунтов (0=выкл; по умолчанию — settings)",
+    )
+    parser.add_argument(
         "--csv-broadcast",
         metavar="DIR",
         help="Рассылка по CSV из пакета (ZIP, proxies, тексты; apis_sessions.txt + apis.txt)",
@@ -538,6 +558,13 @@ def main() -> None:
         "--csv-broadcast-text-only",
         action="store_true",
         help="Как --broadcast-text-only: только text_1/2.txt",
+    )
+    parser.add_argument(
+        "--csv-account-gap-minutes",
+        type=float,
+        default=None,
+        metavar="M",
+        help="Мин. минут между успешными ЛС любых аккаунтов в CSV-рассылке (0=выкл; иначе settings, по умолч. 5 мин)",
     )
     parser.add_argument(
         "--clear-accounts",
@@ -589,6 +616,7 @@ def main() -> None:
                 args.broadcast_zip_conflict,
                 args.broadcast_mode,
                 send_media=not args.broadcast_text_only,
+                account_gap_minutes=args.broadcast_account_gap_minutes,
             )
         )
     if args.csv_broadcast or args.csv_recipients or args.csv_skip_sent:
@@ -604,6 +632,7 @@ def main() -> None:
                 send_media=not args.csv_broadcast_text_only,
                 sent_log=args.csv_sent_log,
                 skip_sent=args.csv_skip_sent,
+                csv_account_gap_minutes=args.csv_account_gap_minutes,
             )
         )
     if args.clear_accounts or args.wipe_sessions or args.clear_proxies:

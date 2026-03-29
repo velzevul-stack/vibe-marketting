@@ -193,6 +193,15 @@ class Settings:
         self.broadcast_precache_media_to_saved: bool = bool(
             self._data.get("broadcast_precache_media_to_saved", True)
         )
+        # Минимум секунд между успешными отправками с разных аккаунтов (общая очередь).
+        try:
+            self.broadcast_min_gap_between_accounts_sec: float = float(
+                self._data.get("broadcast_min_gap_between_accounts_sec", 300)
+            )
+        except (TypeError, ValueError):
+            self.broadcast_min_gap_between_accounts_sec = 300.0
+        if self.broadcast_min_gap_between_accounts_sec < 0:
+            self.broadcast_min_gap_between_accounts_sec = 0.0
 
 
 def clone_settings(**overrides) -> Settings:

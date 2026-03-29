@@ -62,18 +62,29 @@ api_id:api_hash <прокси_одной_строкой> <stem>
 
 Аккаунты с историей успешной рассылки в SQLite по-прежнему **не перезаписываются** при назначении прокси из пула (см. `assign_proxies_round_robin_to_accounts`).
 
+## Интервал между аккаунтами
+
+Чтобы аккаунты **не слали одновременно**:
+
+- В **CSV-рассылке** задаётся **`--csv-delay-minutes`** — минимум между отправками **одной** сессии (включая первую после precache), и **`--csv-account-gap-minutes`** или **`broadcast_min_gap_between_accounts_sec`** в `settings.json` — минимум между **любыми двумя** успешными ЛС (разные или те же аккаунты). Дополнительно первое «окно» сессии сдвигается на `индекс_воркера × зазор`, чтобы первая волна не была синхронной.
+- В **рассылке из БД** (`--broadcast`): тот же межаккаунтный зазор — **`--broadcast-account-gap-minutes`** или тот же ключ в `settings.json`; перед каждой отправкой ждётся глобальная очередь, после precache воркер `i` дополнительно ждёт `i × зазор` секунд.
+
+`0` в минутах (CLI) или `0` в секундах (settings) отключает межаккаунтный зазор.
+
 ## CLI
 
 Рассылка из БД:
 
 ```bash
 python main.py --broadcast ./campaign --broadcast-limit 500
+python main.py --broadcast ./campaign --broadcast-account-gap-minutes 5
 ```
 
 Рассылка по CSV (без БД, см. также [README](../README.md)):
 
 ```bash
 python main.py --csv-broadcast ./campaign --csv-recipients ./members.csv --csv-delay-minutes 30
+python main.py --csv-broadcast ./campaign --csv-recipients ./members.csv --csv-delay-minutes 30 --csv-account-gap-minutes 5
 ```
 
 Конфликт имён при распаковке ZIP: `--broadcast-zip-conflict skip|overwrite`.

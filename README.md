@@ -27,9 +27,12 @@ python main.py -h   # справка по флагам (--assign-proxies и т.�
 
 ```bash
 python main.py --csv-broadcast ./campaign --csv-recipients ./members.csv --csv-delay-minutes 30
+python main.py --csv-broadcast ./campaign --csv-recipients ./members.csv --csv-delay-minutes 30 --csv-account-gap-minutes 5
 python main.py --csv-broadcast ./campaign --csv-recipients ./members.csv --csv-limit 250 --csv-skip-sent
 python main.py --csv-broadcast ./campaign --csv-recipients ./members.csv --csv-broadcast-text-only
 ```
+
+Межаккаунтный интервал по умолчанию — `broadcast_min_gap_between_accounts_sec` в `settings.json` (300 с = 5 мин); переопределение: `--csv-account-gap-minutes` / `--broadcast-account-gap-minutes`, `0` — выкл.
 
 Конфликт имён сессий: **`--broadcast-zip-conflict skip|overwrite`**.
 

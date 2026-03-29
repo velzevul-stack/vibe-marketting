@@ -34,6 +34,7 @@ from telethon.errors import (
 )
 
 from src.broadcast.bundle import CampaignBundle, read_campaign_texts
+from src.broadcast.send_pacing import GlobalAccountSendGap
 from src.broadcast.media_precache import precache_campaign_images
 from src.broadcast.text_jitter import apply_caption_homoglyph
 from src.config import Settings, load_accounts, is_proxy_enabled, telethon_session_file
@@ -185,6 +186,7 @@ async def run_dm_broadcast(
     fixed_client: TelegramClient | None = None,
     fixed_session_label: str | None = None,
     disconnect_fixed_client: bool = True,
+    account_gap_seconds: float | None = None,
 ) -> BroadcastTotals:
     """
     Общая asyncio.Queue получателей; при флуде/лимите суток и т.п. задача возвращается в пул
@@ -195,6 +197,8 @@ async def run_dm_broadcast(
     no_proxy — не использовать прокси при создании клиента из пула (для «один аккаунт без прокси»).
     fixed_client + fixed_session_label — один заранее подключённый клиент (отдельный вход);
     при disconnect_fixed_client=False отключение остаётся на вызывающей стороне.
+    account_gap_seconds — минимум секунд между успешными отправками с любых аккаунтов;
+    None — взять из settings.broadcast_min_gap_between_accounts_sec; 0 — выкл.
     """
     await db.init()
     texts = read_campaign_texts(bundle)
@@ -273,6 +277,13 @@ async def run_dm_broadcast(
     _bc_label = fixed_label
     _bc_own_disc = disconnect_fixed_client
     _broadcast_no_proxy = bool(no_proxy)
+    _gap_raw = (
+        float(account_gap_seconds)
+        if account_gap_seconds is not None
+        else float(settings.broadcast_min_gap_between_accounts_sec)
+    )
+    _gap_sec = 0.0 if fixed_client is not None else max(0.0, _gap_raw)
+    global_send_gap = GlobalAccountSendGap(_gap_sec)
     work_q: asyncio.Queue = asyncio.Queue()
     for u in users:
         await work_q.put(_WorkItem(user=u, tried=frozenset()))
@@ -517,6 +528,9 @@ async def run_dm_broadcast(
             elif send_media:
                 cached_handles = None
 
+            if global_send_gap.gap_sec > 0:
+                await asyncio.sleep(worker_index * global_send_gap.gap_sec)
+
             while True:
                 await _set_worker_status(session_name, "ожидание задачи")
                 item = await work_q.get()
@@ -583,6 +597,8 @@ async def run_dm_broadcast(
                         await _add_totals(session_name, dailycap=1)
                         await _try_requeue(u, tried, session_name, preview, progress, task_id)
                         continue
+
+                await global_send_gap.wait_my_turn()
 
                 async def _reconnect_client_3x(reason: str) -> bool:
                     for attempt in range(1, _DISCONNECT_RECONNECT_ATTEMPTS + 1):
@@ -652,6 +668,7 @@ async def run_dm_broadcast(
                         f"  [green]OK[/] [dim]{escape(session_name)}[/] → [white]{escape(preview)}[/]"
                     )
                     await _add_totals(session_name, sent=1)
+                    await global_send_gap.mark_success()
                     await _finalize_user(progress, task_id)
 
                 async def _try_send_resilient() -> None:
@@ -890,7 +907,7 @@ async def run_dm_broadcast(
                     smart_delay(settings.delay_broadcast_min, settings.delay_broadcast_max)
                 )
         finally:
-            if is_fixed and not _bc_own_disc:
+            if _bc_fixed is not None and not _bc_own_disc:
                 pass
             else:
                 try:
@@ -922,6 +939,11 @@ async def run_dm_broadcast(
             _proxy_tail += " [dim](клиент: отдельный вход)[/]"
         elif no_proxy:
             _proxy_tail += " [dim](эта рассылка: без прокси)[/]"
+        _gap_tail = (
+            f", межаккаунтный зазор [white]{_gap_sec:.0f}[/]s [dim](+ сдвиг старта по воркеру)[/]"
+            if _gap_sec > 0
+            else ""
+        )
         await _log(
             f"[bold]Старт рассылки[/] ([dim]{escape(mode_label)}[/]): аккаунтов [white]{n_acc}[/], "
             f"получателей [white]{len(users)}[/], лимит/акк/сутки UTC: [white]{daily_limit or '—'}[/], "
@@ -929,7 +951,7 @@ async def run_dm_broadcast(
             f"retire после PeerFlood: [white]{retire_after}[/], "
             f"[dim]PeerFlood — пауза по той же лестнице, что FloodWait (без секунд из RPC)[/], "
             f"{media_part}, "
-            f"прокси: {_proxy_tail}"
+            f"прокси: {_proxy_tail}{_gap_tail}"
         )
         await _log("[dim]Ниже таблица статусов аккаунтов обновляется ~1 с.[/]")
 

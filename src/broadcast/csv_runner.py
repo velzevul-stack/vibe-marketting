@@ -32,6 +32,7 @@ from telethon.errors import (
     UsernameNotOccupiedError,
 )
 from src.broadcast.bundle import CampaignBundle, read_campaign_texts
+from src.broadcast.send_pacing import CsvSendPacer
 from src.broadcast.media_precache import precache_campaign_images
 from src.broadcast.text_jitter import apply_caption_homoglyph
 from src.broadcast.runner import (
@@ -184,10 +185,13 @@ async def run_csv_dm_broadcast(
     delay_seconds: float,
     send_media: bool,
     sent_log_path: Path | None,
+    account_gap_seconds: float = 0.0,
 ) -> BroadcastTotals:
     """
     Параллельные воркеры (один на сессию), очередь получателей только у своей сессии.
-    После успешного подключения — ``delay_seconds`` до первой отправки; после каждой успешной — снова.
+    ``delay_seconds`` — минимум между отправками одной сессии (и до первой после precache).
+    ``account_gap_seconds`` — дополнительно не меньше этого интервала между любыми двумя успешными
+    отправками; стемы со сдвигом ``stagger_index * gap`` по первому окну, чтобы не слать пачкой.
     """
     texts = read_campaign_texts(bundle)
     images = bundle.image_paths
@@ -208,6 +212,10 @@ async def run_csv_dm_broadcast(
     totals_lock = asyncio.Lock()
     log_lock = asyncio.Lock()
     session_connect_locks: dict[str, asyncio.Lock] = {}
+    pacer = CsvSendPacer(
+        own_interval_sec=max(0.0, float(delay_seconds)),
+        account_gap_sec=max(0.0, float(account_gap_seconds)),
+    )
 
     async def _log(msg: str) -> None:
         async with log_lock:
@@ -277,7 +285,9 @@ async def run_csv_dm_broadcast(
                     )
                     cached_handles = None
 
-            await asyncio.sleep(max(0.0, float(delay_seconds)))
+            pacer.mark_session_ready_after_precache(
+                session_name, stagger_index=worker_index
+            )
 
             async def _reconnect_client(reason: str) -> bool:
                 for attempt in range(1, _DISCONNECT_RECONNECT_ATTEMPTS + 1):
@@ -303,6 +313,7 @@ async def run_csv_dm_broadcast(
                 return False
 
             for u in buckets.get(session_name, []):
+                await pacer.wait_before_send(session_name)
                 h = _user_stable_hash(u)
                 raw_caption = texts[h % 2]
                 caption = apply_caption_homoglyph(raw_caption, settings)
@@ -369,7 +380,7 @@ async def run_csv_dm_broadcast(
                         outcome = await _send_with_reconnect()
                         user_finished = True
                         if outcome == "sent":
-                            await asyncio.sleep(max(0.0, float(delay_seconds)))
+                            await pacer.mark_sent(session_name)
                     except FloodWaitError as e_fw:
                         send_ok = False
                         for _ in range(_MAX_FLOOD_WAIT_ROUNDS):
@@ -399,13 +410,13 @@ async def run_csv_dm_broadcast(
                                 if o2 in ("sent", "skipped", "fail_conn"):
                                     user_finished = True
                                     send_ok = o2 == "sent"
+                                    if o2 == "sent":
+                                        await pacer.mark_sent(session_name)
                                 break
                             except FloodWaitError as e2:
                                 e_fw = e2
                                 continue
                         if user_finished:
-                            if send_ok:
-                                await asyncio.sleep(max(0.0, float(delay_seconds)))
                             break
                         await _log(
                             f"  [yellow]skip[/] {escape(session_name)} {escape(preview)} — "
@@ -495,9 +506,14 @@ async def run_csv_dm_broadcast(
             except Exception:
                 pass
 
+    gap_note = (
+        f", межаккаунтно ≥[white]{account_gap_seconds:.0f}[/]s"
+        if account_gap_seconds > 0
+        else ""
+    )
     await _log(
         f"[bold]CSV рассылка[/]: сессий [white]{len(names)}[/], получателей [white]{len(recipients)}[/], "
-        f"задач [white]{total_tasks}[/], пауза [white]{delay_seconds:.0f}[/]s, "
+        f"задач [white]{total_tasks}[/], пауза/сессия [white]{delay_seconds:.0f}[/]s{gap_note}, "
         f"медиа: [white]{'да' if send_media else 'нет'}[/], прокси: [white]{is_proxy_enabled()}[/]"
     )
 
