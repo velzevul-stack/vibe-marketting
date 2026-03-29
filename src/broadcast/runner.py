@@ -37,7 +37,13 @@ from src.broadcast.bundle import CampaignBundle, read_campaign_texts
 from src.broadcast.send_pacing import GlobalAccountSendGap
 from src.broadcast.media_precache import precache_campaign_images
 from src.broadcast.text_jitter import apply_caption_homoglyph
-from src.config import Settings, load_accounts, is_proxy_enabled, telethon_session_file
+from src.config import (
+    Settings,
+    load_accounts,
+    is_proxy_enabled,
+    stagger_index_by_api_group,
+    telethon_session_file,
+)
 from src.telethon_flood_wait import flood_wait_seconds, sleep_flood_wait
 from src.db.database import Database
 from src.invite.manager import AccountPool, smart_delay
@@ -197,7 +203,8 @@ async def run_dm_broadcast(
     no_proxy — не использовать прокси при создании клиента из пула (для «один аккаунт без прокси»).
     fixed_client + fixed_session_label — один заранее подключённый клиент (отдельный вход);
     при disconnect_fixed_client=False отключение остаётся на вызывающей стороне.
-    account_gap_seconds — минимум секунд между успешными отправками с любых аккаунтов;
+    account_gap_seconds — минимум секунд между успешными отправками **внутри одной пары**
+    api_id/api_hash (разные приложения Telegram — независимые очереди);
     None — взять из settings.broadcast_min_gap_between_accounts_sec; 0 — выкл.
     """
     await db.init()
@@ -284,6 +291,7 @@ async def run_dm_broadcast(
     )
     _gap_sec = 0.0 if fixed_client is not None else max(0.0, _gap_raw)
     global_send_gap = GlobalAccountSendGap(_gap_sec)
+    _api_by_sn, _stagger_by_sn = stagger_index_by_api_group(list(session_names))
     work_q: asyncio.Queue = asyncio.Queue()
     for u in users:
         await work_q.put(_WorkItem(user=u, tried=frozenset()))
@@ -463,7 +471,12 @@ async def run_dm_broadcast(
                 await asyncio.sleep(random.uniform(0.02, 0.08))
 
     async def _worker(
-        session_name: str, progress: Progress, task_id: int, worker_index: int = 0
+        session_name: str,
+        progress: Progress,
+        task_id: int,
+        worker_index: int,
+        api_group_key: str,
+        api_stagger_index: int,
     ) -> None:
         client = pool.get_client(session_name, settings=settings)
         if not client:
@@ -529,7 +542,7 @@ async def run_dm_broadcast(
                 cached_handles = None
 
             if global_send_gap.gap_sec > 0:
-                await asyncio.sleep(worker_index * global_send_gap.gap_sec)
+                await asyncio.sleep(api_stagger_index * global_send_gap.gap_sec)
 
             while True:
                 await _set_worker_status(session_name, "ожидание задачи")
@@ -598,7 +611,7 @@ async def run_dm_broadcast(
                         await _try_requeue(u, tried, session_name, preview, progress, task_id)
                         continue
 
-                await global_send_gap.wait_my_turn()
+                await global_send_gap.wait_my_turn(api_group_key)
 
                 async def _reconnect_client_3x(reason: str) -> bool:
                     for attempt in range(1, _DISCONNECT_RECONNECT_ATTEMPTS + 1):
@@ -668,7 +681,7 @@ async def run_dm_broadcast(
                         f"  [green]OK[/] [dim]{escape(session_name)}[/] → [white]{escape(preview)}[/]"
                     )
                     await _add_totals(session_name, sent=1)
-                    await global_send_gap.mark_success()
+                    await global_send_gap.mark_success(api_group_key)
                     await _finalize_user(progress, task_id)
 
                 async def _try_send_resilient() -> None:
@@ -940,7 +953,7 @@ async def run_dm_broadcast(
         elif no_proxy:
             _proxy_tail += " [dim](эта рассылка: без прокси)[/]"
         _gap_tail = (
-            f", межаккаунтный зазор [white]{_gap_sec:.0f}[/]s [dim](+ сдвиг старта по воркеру)[/]"
+            f", зазор [white]{_gap_sec:.0f}[/]s [dim]на группу api_id:api_hash (+ сдвиг старта внутри группы)[/]"
             if _gap_sec > 0
             else ""
         )
@@ -985,7 +998,14 @@ async def run_dm_broadcast(
         try:
             await asyncio.gather(
                 *(
-                    _worker(session_names[i], progress, task_id, worker_index=i)
+                    _worker(
+                        session_names[i],
+                        progress,
+                        task_id,
+                        i,
+                        _api_by_sn.get(session_names[i], "_default"),
+                        _stagger_by_sn.get(session_names[i], 0),
+                    )
                     for i in range(n_acc)
                 )
             )

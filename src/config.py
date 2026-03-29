@@ -1163,6 +1163,47 @@ def account_row_for_session_name(session_name: str) -> dict | None:
     return None
 
 
+def telethon_api_group_key_for_session(session_name: str) -> str:
+    """
+    Ключ группы приложения Telegram (одинаковый api_id + api_hash → одна группа).
+    Для паузы «между любыми ЛС» считается отдельно по каждой группе.
+    """
+    sn = (session_name or "").strip()
+    row = account_row_for_session_name(sn) if sn else None
+    if not row:
+        return f"_nosess:{sn or '?'}"
+    aid = row.get("api_id")
+    ah = (row.get("api_hash") or "").strip()
+    if aid is not None and ah:
+        try:
+            return f"{int(aid)}:{ah}"
+        except (TypeError, ValueError):
+            pass
+    return f"_noapi:{sn}"
+
+
+def stagger_index_by_api_group(
+    session_names: list[str],
+) -> tuple[dict[str, str], dict[str, int]]:
+    """
+    Для каждой сессии — ключ API-группы и индекс сдвига (0..n-1) внутри своей группы
+    (для разнесения первого ЛС после precache).
+    """
+    names = [s.strip() for s in session_names if s and str(s).strip()]
+    api_by_sn: dict[str, str] = {
+        sn: telethon_api_group_key_for_session(sn) for sn in names
+    }
+    by_api: dict[str, list[str]] = {}
+    for sn in names:
+        by_api.setdefault(api_by_sn[sn], []).append(sn)
+    stagger: dict[str, int] = {}
+    for grp in by_api.values():
+        grp.sort()
+        for i, sn in enumerate(grp):
+            stagger[sn] = i
+    return api_by_sn, stagger
+
+
 def account_session_has_full_api(session_name: str) -> bool:
     """У аккаунта есть ``api_id`` и ``api_hash`` (можно поднимать Telethon)."""
     row = account_row_for_session_name(session_name)

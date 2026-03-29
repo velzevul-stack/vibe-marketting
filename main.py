@@ -39,6 +39,23 @@ def _run_startup_session_sync() -> None:
         con.print(f"[red]sync_sessions: {e}[/]")
 
 
+def _parse_csv_minutes_interval(spec: str, *, flag: str) -> tuple[float, float | None]:
+    """
+    Одно число минут или ``MIN-MAX`` (случайный uniform между отправками).
+    Допускается дефис ``-`` и длинное тире.
+    """
+    s = spec.strip().replace("—", "-").replace("–", "-")
+    if not s:
+        raise ValueError(f"{flag}: пустое значение")
+    if "-" in s:
+        a, b = s.split("-", 1)
+        lo, hi = float(a.strip()), float(b.strip())
+        if hi < lo:
+            raise ValueError(f"{flag}: max меньше min")
+        return (lo, hi)
+    return (float(s), None)
+
+
 def _cli_proxy_state(state: str) -> int:
     """Включить/выключить прокси в settings.json или показать статус."""
     from rich.console import Console
@@ -234,14 +251,14 @@ def _cli_broadcast(
 def _cli_csv_broadcast(
     dir_path: str,
     csv_path: str,
-    delay_minutes: float,
+    delay_minutes_spec: str,
     zip_conflict: str,
     *,
     csv_limit: int | None,
     send_media: bool = True,
     sent_log: str | None = None,
     skip_sent: bool = False,
-    csv_account_gap_minutes: float | None = None,
+    csv_account_gap_spec: str | None = None,
 ) -> int:
     """Рассылка по CSV из пакета: sessions_bind, apis_sessions, proxy.txt RR, без БД."""
     import asyncio
@@ -349,11 +366,33 @@ def _cli_csv_broadcast(
         con.print("[red]Нет получателей в CSV (после лимита и --csv-skip-sent).[/]")
         return 1
 
-    delay_sec = max(0.0, float(delay_minutes) * 60.0)
-    if csv_account_gap_minutes is not None:
-        csv_gap_sec = max(0.0, float(csv_account_gap_minutes) * 60.0)
-    else:
+    try:
+        d_lo, d_hi = _parse_csv_minutes_interval(
+            delay_minutes_spec, flag="--csv-delay-minutes"
+        )
+    except ValueError as e:
+        con.print(f"[red]{e}[/]")
+        return 1
+    delay_sec = max(0.0, d_lo * 60.0)
+    delay_max_sec = None if d_hi is None else max(delay_sec, d_hi * 60.0)
+
+    if csv_account_gap_spec is None:
         csv_gap_sec = max(0.0, float(sett.broadcast_min_gap_between_accounts_sec))
+        csv_gap_max_sec = None
+    else:
+        try:
+            g_lo, g_hi = _parse_csv_minutes_interval(
+                csv_account_gap_spec, flag="--csv-account-gap-minutes"
+            )
+        except ValueError as e:
+            con.print(f"[red]{e}[/]")
+            return 1
+        if g_lo <= 0 and (g_hi is None or g_hi <= 0):
+            csv_gap_sec = 0.0
+            csv_gap_max_sec = None
+        else:
+            csv_gap_sec = max(0.0, g_lo * 60.0)
+            csv_gap_max_sec = None if g_hi is None else max(csv_gap_sec, g_hi * 60.0)
 
     async def _run():
         return await run_csv_dm_broadcast(
@@ -366,6 +405,8 @@ def _cli_csv_broadcast(
             send_media=send_media,
             sent_log_path=log_path,
             account_gap_seconds=csv_gap_sec,
+            delay_max_seconds=delay_max_sec,
+            account_gap_max_seconds=csv_gap_max_sec,
         )
 
     totals = asyncio.run(_run())
@@ -520,7 +561,7 @@ def main() -> None:
         type=float,
         default=None,
         metavar="M",
-        help="Мин. минут между успешными ЛС с разных аккаунтов (0=выкл; по умолчанию — settings)",
+        help="Мин. минут между успешными ЛС внутри одной пары api_id:api_hash (0=выкл; иначе settings)",
     )
     parser.add_argument(
         "--csv-broadcast",
@@ -534,9 +575,10 @@ def main() -> None:
     )
     parser.add_argument(
         "--csv-delay-minutes",
-        type=float,
-        default=30.0,
-        help="Пауза в минутах после логина до 1-го ЛС и между отправками (по умолчанию 30)",
+        type=str,
+        default="30",
+        metavar="M",
+        help="Пауза одной сессии: минуты или MIN-MAX (случайный uniform между ЛС), после precache",
     )
     parser.add_argument(
         "--csv-limit",
@@ -561,10 +603,10 @@ def main() -> None:
     )
     parser.add_argument(
         "--csv-account-gap-minutes",
-        type=float,
+        type=str,
         default=None,
         metavar="M",
-        help="Мин. минут между успешными ЛС любых аккаунтов в CSV-рассылке (0=выкл; иначе settings, по умолч. 5 мин)",
+        help="Между успешными ЛС внутри одной API-группы: минуты или MIN-MAX; 0=выкл; иначе settings",
     )
     parser.add_argument(
         "--clear-accounts",
@@ -632,7 +674,7 @@ def main() -> None:
                 send_media=not args.csv_broadcast_text_only,
                 sent_log=args.csv_sent_log,
                 skip_sent=args.csv_skip_sent,
-                csv_account_gap_minutes=args.csv_account_gap_minutes,
+                csv_account_gap_spec=args.csv_account_gap_minutes,
             )
         )
     if args.clear_accounts or args.wipe_sessions or args.clear_proxies:

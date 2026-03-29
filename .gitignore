@@ -2,6 +2,7 @@ sessions/
 accounts/
 accouts/
 campaign/
+server_campaign/
 output/*.db
 output/*.json
 config/accounts.json

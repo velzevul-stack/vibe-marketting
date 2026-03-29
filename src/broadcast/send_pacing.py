@@ -1,73 +1,120 @@
-"""Паузы между отправками: глобально между аккаунтами и (для CSV) ещё минимум на аккаунт."""
+"""Паузы между отправками: по группам API и (для CSV) ещё минимум на сессию."""
 from __future__ import annotations
 
 import asyncio
+import random
 import time
+from collections.abc import Mapping
 
 
 class GlobalAccountSendGap:
-    """Минимум секунд между успешными отправками (любые сессии), плюс стартовый сдвиг по индексу воркера."""
+    """
+    Минимум секунд между успешными отправками **внутри одной группы API**
+    (``api_id`` + ``api_hash`` из accounts.json). У разных приложений — независимые очереди.
+    """
 
     def __init__(self, gap_sec: float) -> None:
         self.gap_sec = max(0.0, float(gap_sec))
         self._lock = asyncio.Lock()
-        self._last_success_mono: float | None = None
+        self._last_success_mono: dict[str, float] = {}
 
-    async def wait_my_turn(self) -> None:
+    async def wait_my_turn(self, api_group_key: str) -> None:
         if self.gap_sec <= 0:
             return
+        key = str(api_group_key or "").strip() or "_default"
         while True:
             async with self._lock:
                 now = time.monotonic()
-                if self._last_success_mono is None:
+                last = self._last_success_mono.get(key)
+                if last is None:
                     return
-                need = self._last_success_mono + self.gap_sec - now
+                need = last + self.gap_sec - now
             if need < 0.05:
                 return
             await asyncio.sleep(need)
 
-    async def mark_success(self) -> None:
+    async def mark_success(self, api_group_key: str) -> None:
         if self.gap_sec <= 0:
             return
+        key = str(api_group_key or "").strip() or "_default"
         async with self._lock:
-            self._last_success_mono = time.monotonic()
+            self._last_success_mono[key] = time.monotonic()
 
 
 class CsvSendPacer:
     """
-    Для CSV: ``own_interval_sec`` между отправками одной сессии,
-    ``account_gap_sec`` между любыми двумя успешными отправками (разные или те же аккаунты).
+    Для CSV: пауза между отправками одной сессии (фиксированная или ``uniform(min,max)``),
+    и между успешными ЛС **в пределах одной группы API** — отдельный интервал (фикс. или случайный).
     """
 
-    def __init__(self, own_interval_sec: float, account_gap_sec: float) -> None:
-        self.own_interval_sec = max(0.0, float(own_interval_sec))
-        self.account_gap_sec = max(0.0, float(account_gap_sec))
+    def __init__(
+        self,
+        own_interval_sec: float,
+        account_gap_sec: float,
+        *,
+        own_interval_max_sec: float | None = None,
+        account_gap_max_sec: float | None = None,
+        session_api_group: Mapping[str, str] | None = None,
+    ) -> None:
+        self._own_min = max(0.0, float(own_interval_sec))
+        self._own_max = (
+            None
+            if own_interval_max_sec is None
+            else max(self._own_min, float(own_interval_max_sec))
+        )
+        self._gap_min = max(0.0, float(account_gap_sec))
+        self._gap_max = (
+            None
+            if account_gap_max_sec is None
+            else max(self._gap_min, float(account_gap_max_sec))
+        )
+        self._session_api = dict(session_api_group or {})
         self._lock = asyncio.Lock()
-        self._last_global: float | None = None
-        self._per_session: dict[str, float] = {}
+        self._deadline_glob: dict[str, float | None] = {}
+        self._deadline_own: dict[str, float] = {}
+
+    def _api_key(self, session_name: str) -> str:
+        sn = (session_name or "").strip()
+        if sn in self._session_api:
+            return self._session_api[sn]
+        return f"_unknown:{sn or '?'}"
+
+    def _stagger_base_sec(self) -> float:
+        """Сдвиг старта воркеров внутри группы API: по минимальному зазору группы."""
+        return self._gap_min
+
+    def _sample_own(self) -> float:
+        if self._own_max is None:
+            return self._own_min
+        return random.uniform(self._own_min, self._own_max)
+
+    def _sample_gap(self) -> float:
+        if self._gap_max is None:
+            return self._gap_min
+        return random.uniform(self._gap_min, self._gap_max)
 
     def mark_session_ready_after_precache(
         self, session_name: str, *, stagger_index: int = 0
     ) -> None:
         """
-        Старт отсчёта own_interval до первой отправки.
-        ``stagger_index * account_gap_sec`` сдвигает первое окно этой сессии (чтобы не слали пачкой).
+        Первое ЛС не раньше ``base + stagger_index * min_gap`` (индекс — внутри своей API-группы).
+        После успеха дедлайны сдвигаются на случайные/фиксированные интервалы.
         """
         base = time.monotonic()
         si = max(0, int(stagger_index))
-        shift = si * self.account_gap_sec
-        self._per_session[session_name] = base - self.own_interval_sec + shift
+        shift = si * self._stagger_base_sec()
+        self._deadline_own[session_name] = base + shift
 
     async def wait_before_send(self, session_name: str) -> None:
         while True:
             async with self._lock:
                 now = time.monotonic()
-                own_last = self._per_session.get(session_name, now)
-                w_own = max(0.0, own_last + self.own_interval_sec - now)
-                w_glob = 0.0
-                if self.account_gap_sec > 0 and self._last_global is not None:
-                    w_glob = max(0.0, self._last_global + self.account_gap_sec - now)
-                wait = max(w_own, w_glob)
+                d_o = self._deadline_own.get(session_name, now)
+                ak = self._api_key(session_name)
+                d_g = self._deadline_glob.get(ak)
+                need_o = max(0.0, d_o - now)
+                need_g = max(0.0, d_g - now) if d_g is not None else 0.0
+                wait = max(need_o, need_g)
             if wait < 0.05:
                 return
             await asyncio.sleep(wait)
@@ -75,5 +122,6 @@ class CsvSendPacer:
     async def mark_sent(self, session_name: str) -> None:
         async with self._lock:
             t = time.monotonic()
-            self._last_global = t
-            self._per_session[session_name] = t
+            self._deadline_own[session_name] = t + self._sample_own()
+            ak = self._api_key(session_name)
+            self._deadline_glob[ak] = t + self._sample_gap()

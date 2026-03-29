@@ -45,7 +45,7 @@ from src.broadcast.runner import (
     _resolve_peer,
     _user_stable_hash,
 )
-from src.config import Settings, is_proxy_enabled, telethon_session_file
+from src.config import Settings, is_proxy_enabled, stagger_index_by_api_group, telethon_session_file
 from src.invite.manager import AccountPool
 from src.telethon_flood_wait import flood_wait_seconds, sleep_flood_wait
 from src.telethon_username_resolve import is_username_missing_telegram_error
@@ -186,16 +186,20 @@ async def run_csv_dm_broadcast(
     send_media: bool,
     sent_log_path: Path | None,
     account_gap_seconds: float = 0.0,
+    delay_max_seconds: float | None = None,
+    account_gap_max_seconds: float | None = None,
 ) -> BroadcastTotals:
     """
     Параллельные воркеры (один на сессию), очередь получателей только у своей сессии.
-    ``delay_seconds`` — минимум между отправками одной сессии (и до первой после precache).
-    ``account_gap_seconds`` — дополнительно не меньше этого интервала между любыми двумя успешными
-    отправками; стемы со сдвигом ``stagger_index * gap`` по первому окну, чтобы не слать пачкой.
+    ``delay_seconds`` / ``delay_max_seconds`` — пауза между отправками одной сессии (фикс. или
+    случайный uniform); после precache первое окно сдвигается по индексу внутри API-группы.
+    ``account_gap_seconds`` / ``account_gap_max_seconds`` — интервал между успешными ЛС **внутри одной
+    пары** api_id/api_hash (разные приложения — независимые очереди).
     """
     texts = read_campaign_texts(bundle)
     images = bundle.image_paths
     names = sorted({s.strip() for s in session_names if s and str(s).strip()})
+    _api_by_sn, _stagger_by_sn = stagger_index_by_api_group(list(names))
     if not names:
         console.print("[red]csv рассылка: нет сессий[/]")
         return BroadcastTotals()
@@ -215,6 +219,17 @@ async def run_csv_dm_broadcast(
     pacer = CsvSendPacer(
         own_interval_sec=max(0.0, float(delay_seconds)),
         account_gap_sec=max(0.0, float(account_gap_seconds)),
+        own_interval_max_sec=(
+            None
+            if delay_max_seconds is None
+            else max(0.0, float(delay_max_seconds))
+        ),
+        account_gap_max_sec=(
+            None
+            if account_gap_max_seconds is None
+            else max(0.0, float(account_gap_max_seconds))
+        ),
+        session_api_group=_api_by_sn,
     )
 
     async def _log(msg: str) -> None:
@@ -235,7 +250,9 @@ async def run_csv_dm_broadcast(
             s, f, sk, pr, dc, rx = totals.by_session[sn]
             totals.by_session[sn] = (s + sent, f + failed, sk + skipped, pr, dc, rx)
 
-    async def _worker(session_name: str, worker_index: int) -> None:
+    async def _worker(
+        session_name: str, connect_jitter_index: int, api_stagger_index: int
+    ) -> None:
         pool = AccountPool()
         pool.ensure_account_state(session_name)
         client = pool.get_client(session_name, settings=settings)
@@ -249,7 +266,7 @@ async def run_csv_dm_broadcast(
             return
 
         try:
-            await asyncio.sleep(worker_index * 0.12 + random.uniform(0, 0.08))
+            await asyncio.sleep(connect_jitter_index * 0.12 + random.uniform(0, 0.08))
             try:
                 async with _session_connect_lock(session_name, settings, session_connect_locks):
                     await _connect_telethon_sqlite_resilient(client)
@@ -286,7 +303,7 @@ async def run_csv_dm_broadcast(
                     cached_handles = None
 
             pacer.mark_session_ready_after_precache(
-                session_name, stagger_index=worker_index
+                session_name, stagger_index=api_stagger_index
             )
 
             async def _reconnect_client(reason: str) -> bool:
@@ -506,14 +523,20 @@ async def run_csv_dm_broadcast(
             except Exception:
                 pass
 
-    gap_note = (
-        f", межаккаунтно ≥[white]{account_gap_seconds:.0f}[/]s"
-        if account_gap_seconds > 0
-        else ""
-    )
+    def _rng_note(lo: float, hi: float | None, suffix: str) -> str:
+        if hi is None or abs(hi - lo) < 0.05:
+            return f"{lo:.0f}{suffix}"
+        return f"{lo:.0f}–{hi:.0f}{suffix}"
+
+    gap_note = ""
+    if account_gap_seconds > 0:
+        gap_note = (
+            f", по API-группе [white]{_rng_note(account_gap_seconds, account_gap_max_seconds, 's')}[/]"
+        )
+    own_note = _rng_note(delay_seconds, delay_max_seconds, "s")
     await _log(
         f"[bold]CSV рассылка[/]: сессий [white]{len(names)}[/], получателей [white]{len(recipients)}[/], "
-        f"задач [white]{total_tasks}[/], пауза/сессия [white]{delay_seconds:.0f}[/]s{gap_note}, "
+        f"задач [white]{total_tasks}[/], пауза/сессия [white]{own_note}[/]{gap_note}, "
         f"медиа: [white]{'да' if send_media else 'нет'}[/], прокси: [white]{is_proxy_enabled()}[/]"
     )
 
@@ -528,8 +551,8 @@ async def run_csv_dm_broadcast(
         tid = progress.add_task("[cyan]CSV рассылка[/]", total=total_tasks)
         prog_lock = asyncio.Lock()
 
-        async def _wrapped(sn: str, idx: int) -> None:
-            await _worker(sn, idx)
+        async def _wrapped(sn: str, jitter_i: int) -> None:
+            await _worker(sn, jitter_i, _stagger_by_sn.get(sn, 0))
             n = len(buckets.get(sn, []))
             async with prog_lock:
                 progress.advance(tid, n)
