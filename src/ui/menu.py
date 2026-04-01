@@ -680,8 +680,8 @@ def _run_broadcast_from_bundle_menu() -> None:
         if ok_fill and n_fill:
             console.print(
                 f"[green]API из пакета дописан[/] [dim]аккаунтам без api_id/api_hash:[/] "
-                f"[white]{n_fill}[/] [dim](часто[/] [cyan]tg_*[/] [dim]после отдельного входа — "
-                f"раньше назначение шло только по стемам из ZIP)[/]"
+                f"[white]{n_fill}[/] [dim](часто стем = цифры номера после отдельного входа — "
+                f"раньше API по ZIP не назначался таким строкам)[/]"
             )
         elif not ok_fill:
             console.print(f"[yellow]{escape(_msg_fill)}[/]")

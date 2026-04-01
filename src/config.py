@@ -1426,7 +1426,7 @@ def assign_apis_fill_missing_in_accounts(
 ) -> tuple[bool, str, int]:
     """
     Назначить api_id/api_hash только строкам с ``session_name``, у которых нет полного набора ключей
-    (как у отдельного входа ``tg_*``, не попавшего в ``only_session_names`` при назначении по ZIP).
+    (как у отдельного входа по номеру — стем не из ZIP, не попал в ``only_session_names``).
     Round-robin по ``api_pairs``; sidecar обновляется. Уже заполненные ключи не меняются.
     """
     if not api_pairs:

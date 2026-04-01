@@ -167,18 +167,21 @@ async def offer_ephemeral_scrape_proxy_reconfigure(
 
 def _unique_session_stem_from_phone(phone: str) -> str:
     """
-    Имя файла без расширения для .session (локально на диске, не @username в Telegram).
+    Имя файла без расширения для .session — **цифры номера** (как в E.164, без + и пробелов).
+    При коллизии на диске добавляется суффикс ``_<hex>``. Если цифр слишком мало — случайный ``tg_<hex>``.
     """
     digits = digits_only(phone)
-    tail = digits[-8:] if len(digits) >= 4 else (digits or "user")
-    base = f"tg_{tail}"
+    if len(digits) >= 4:
+        base = digits
+    else:
+        base = f"tg_{secrets.token_hex(6)}"
     d = _sessions_dir()
     stem = base
     for _ in range(32):
         if not (d / f"{stem}.session").is_file():
             return stem
         stem = f"{base}_{secrets.token_hex(2)}"
-    return f"tg_{secrets.token_hex(8)}"
+    return f"{base}_{secrets.token_hex(4)}"
 
 
 def _session_paths() -> list[Path]:
@@ -292,7 +295,7 @@ async def _new_login_console(console) -> None:
     auto_name = _unique_session_stem_from_phone(phone)
     session_name = strip_c0_controls(
         Prompt.ask(
-            f"Имя файла в {_session_dir_label()}/ (Enter = автоматически: {auto_name})",
+            f"Имя .session в {_session_dir_label()}/ (Enter = номер как цифры: {auto_name})",
             default=auto_name,
         ).strip()
     )
@@ -527,8 +530,8 @@ async def login_client_for_one_off_scrape(
     session_name = _unique_session_stem_from_phone(phone)
     console.print(
         f"[dim]Вход по номеру и коду — как в приложении Telegram. "
-        f"Ключ сохранится в файл [cyan]{_session_dir_label()}/{session_name}.session[/] "
-        f"(это не логин и не @username, только чтобы не вводить код каждый раз).[/]"
+        f"Ключ: [cyan]{_session_dir_label()}/{session_name}.session[/] "
+        f"(имя файла — цифры номера; не @username).[/]"
     )
 
     proxy_tg = proxy_url_to_telethon(proxy_url)
