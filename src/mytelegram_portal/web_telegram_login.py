@@ -16,25 +16,57 @@ LogFn = Callable[[str], None]
 
 
 def _try_click_phone_login(page: Page, settings: Settings, log: LogFn) -> None:
+    """С экрана QR — кнопка «Log in by phone number» (role=button), не ссылка."""
     patterns = (
+        r"Log in by phone number",
         r"LOG IN BY PHONE",
         r"Log in by phone",
         r"номеру телефона",
-        r"Phone Number",
+        r"по номеру телефона",
         r"по номеру",
+        r"Войти по номеру",
     )
     for pat in patterns:
-        try:
-            link = page.get_by_role("link", name=re.compile(pat, re.I))
-            if link.count() > 0 and link.first.is_visible(timeout=2000):
-                link.first.click(timeout=8000)
-                D.delay_after_click(settings, log)
-                return
-        except Exception:
-            continue
+        rx = re.compile(pat, re.I)
+        for role in ("button", "link"):
+            try:
+                el = page.get_by_role(role, name=rx)
+                if el.count() > 0 and el.first.is_visible(timeout=3500):
+                    el.first.click(timeout=10000)
+                    D.delay_after_click(settings, log)
+                    return
+            except Exception:
+                continue
 
 
 def _fill_phone_field(page: Page, phone: str, settings: Settings, log: LogFn) -> bool:
+    # Telegram Web /k/: номер в contenteditable, страна — соседний .input-select
+    ce_selectors = (
+        'div.input-field:not(.input-select) div.input-field-input[contenteditable="true"]',
+        'div.input-field-input[contenteditable="true"][inputmode="decimal"]',
+    )
+    for sel in ce_selectors:
+        loc = page.locator(sel).first
+        try:
+            if loc.is_visible(timeout=6000):
+                loc.click(timeout=5000)
+                D.delay_after_click(settings, log)
+                loc.fill(phone, timeout=15000)
+                D.delay_after_type(settings, log)
+                return True
+        except Exception:
+            continue
+    try:
+        tb = page.get_by_role(
+            "textbox", name=re.compile(r"phone|телефон|номер", re.I)
+        ).first
+        if tb.is_visible(timeout=4000):
+            tb.click(timeout=5000)
+            tb.fill(phone, timeout=15000)
+            D.delay_after_type(settings, log)
+            return True
+    except Exception:
+        pass
     selectors = (
         'input[type="tel"]',
         'input[inputmode="numeric"]',
@@ -52,7 +84,6 @@ def _fill_phone_field(page: Page, phone: str, settings: Settings, log: LogFn) ->
                 return True
         except Exception:
             continue
-    # Общий fallback: первое видимое поле ввода в зоне логина
     try:
         inp = page.locator("div.input-field input, .input-field input").first
         if inp.is_visible(timeout=3000):
