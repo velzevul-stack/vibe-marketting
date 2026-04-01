@@ -5,7 +5,7 @@ import re
 import time
 from typing import Callable
 
-from playwright.sync_api import Page
+from playwright.sync_api import Locator, Page
 
 from src.config import Settings
 from src.mytelegram_portal import delays as D
@@ -13,6 +13,9 @@ from src.mytelegram_portal import delays as D
 TELEGRAM_WEB_K = "https://web.telegram.org/k/"
 
 LogFn = Callable[[str], None]
+
+_SIGN_TAB = ".tabs-tab.page-sign"
+_AUTH_TAB = ".tabs-tab.page-authCode"
 
 
 def _try_click_phone_login(page: Page, settings: Settings, log: LogFn) -> None:
@@ -39,28 +42,56 @@ def _try_click_phone_login(page: Page, settings: Settings, log: LogFn) -> None:
                 continue
 
 
-def _fill_phone_field(page: Page, phone: str, settings: Settings, log: LogFn) -> bool:
-    # Telegram Web /k/: номер в contenteditable, страна — соседний .input-select
-    ce_selectors = (
-        'div.input-field:not(.input-select) div.input-field-input[contenteditable="true"]',
-        'div.input-field-input[contenteditable="true"][inputmode="decimal"]',
+def _ensure_phone_form_visible(page: Page, settings: Settings, log: LogFn) -> None:
+    """QR по умолчанию: несколько попыток открыть форму с номером."""
+    for _ in range(6):
+        if _is_phone_field_visible(page, quick_ms=900):
+            return
+        _try_click_phone_login(page, settings, log)
+        D.delay_after_navigate(settings, log)
+
+
+def _is_phone_field_visible(page: Page, *, quick_ms: int) -> bool:
+    locs = (
+        page.locator(f"{_SIGN_TAB} div.input-field-phone div.input-field-input[contenteditable='true']"),
+        page.locator("div.input-field-phone div.input-field-input[contenteditable='true']"),
+        page.locator(f"{_SIGN_TAB} div.input-field:not(.input-select) div.input-field-input[contenteditable='true']"),
     )
-    for sel in ce_selectors:
-        loc = page.locator(sel).first
+    for loc in locs:
         try:
-            if loc.is_visible(timeout=6000):
-                loc.click(timeout=5000)
-                D.delay_after_click(settings, log)
-                loc.fill(phone, timeout=15000)
-                D.delay_after_type(settings, log)
+            if loc.first.is_visible(timeout=quick_ms):
                 return True
         except Exception:
             continue
+    return False
+
+
+def _fill_phone_field(page: Page, phone: str, settings: Settings, log: LogFn) -> bool:
+    # Актуальная разметка K: div.input-field.input-field-phone + contenteditable
+    sign = page.locator(_SIGN_TAB)
+    ce_selectors = (
+        "div.input-field-phone div.input-field-input[contenteditable='true']",
+        "div.input-field.input-field-phone div.input-field-input[contenteditable='true']",
+        "div.input-field:not(.input-select) div.input-field-input[contenteditable='true']",
+        'div.input-field-input[contenteditable="true"][inputmode="decimal"]',
+    )
+    for root in (sign, page):
+        for sel in ce_selectors:
+            loc = root.locator(sel).first
+            try:
+                if loc.is_visible(timeout=7000):
+                    loc.click(timeout=5000)
+                    D.delay_after_click(settings, log)
+                    loc.fill(phone, timeout=15000)
+                    D.delay_after_type(settings, log)
+                    return True
+            except Exception:
+                continue
     try:
         tb = page.get_by_role(
             "textbox", name=re.compile(r"phone|телефон|номер", re.I)
         ).first
-        if tb.is_visible(timeout=4000):
+        if tb.is_visible(timeout=5000):
             tb.click(timeout=5000)
             tb.fill(phone, timeout=15000)
             D.delay_after_type(settings, log)
@@ -68,6 +99,7 @@ def _fill_phone_field(page: Page, phone: str, settings: Settings, log: LogFn) ->
     except Exception:
         pass
     selectors = (
+        f"{_SIGN_TAB} input[type='tel']",
         'input[type="tel"]',
         'input[inputmode="numeric"]',
         "input#sign-in-phone-number",
@@ -121,27 +153,122 @@ def _click_next_or_submit(page: Page, settings: Settings, log: LogFn) -> None:
         raise RuntimeError(f"Не найдена кнопка «Далее» / Next: {e}") from e
 
 
+def _auth_root(page: Page) -> Locator:
+    return page.locator(_AUTH_TAB)
+
+
+def _fill_multi_otp_boxes(boxes: Locator, code: str, settings: Settings, log: LogFn) -> bool:
+    n = boxes.count()
+    if n < len(code) or n < 4:
+        return False
+    for i, ch in enumerate(code):
+        try:
+            cell = boxes.nth(i)
+            if not cell.is_visible(timeout=1500):
+                return False
+            cell.click(timeout=3000)
+            cell.fill(ch, timeout=5000)
+        except Exception:
+            return False
+    D.delay_after_type(settings, log)
+    return True
+
+
 def _fill_login_code(page: Page, code: str, settings: Settings, log: LogFn) -> None:
     code = (code or "").strip()
     if not code:
         raise ValueError("Пустой код входа")
-    selectors = (
-        'input[inputmode="numeric"]',
-        'input[type="tel"]',
-        'input[type="text"]',
-    )
-    for sel in selectors:
-        loc = page.locator(sel).first
+
+    auth = _auth_root(page)
+    # После Next DOM переключается на page-authCode; поля часто появляются с задержкой
+    D.delay_after_navigate(settings, log)
+
+    deadline = time.time() + 28.0
+    last_err = ""
+
+    while time.time() < deadline:
         try:
-            if loc.is_visible(timeout=6000):
-                loc.click(timeout=5000)
-                loc.fill(code, timeout=15000)
+            # 1) Несколько одноциферных полей в .input-wrapper
+            multi = auth.locator(
+                ".input-wrapper input:not([type='hidden']):not([type='checkbox']):not([type='radio'])"
+            )
+            mc = multi.count()
+            if mc >= max(4, len(code)):
+                if _fill_multi_otp_boxes(multi, code, settings, log):
+                    _click_next_or_submit(page, settings, log)
+                    return
+
+            # 2) contenteditable (как номер телефона, но на вкладке кода)
+            ce = auth.locator('div.input-field-input[contenteditable="true"]').first
+            if ce.is_visible(timeout=700):
+                ce.click(timeout=4000)
+                ce.fill(code, timeout=15000)
                 D.delay_after_type(settings, log)
                 _click_next_or_submit(page, settings, log)
                 return
-        except Exception:
-            continue
-    raise RuntimeError("Не найдено поле для кода входа в Telegram Web")
+
+            # 3) Один input (только внутри auth — не цепляем поле номера на page-sign)
+            for sel in (
+                'input[autocomplete="one-time-code"]',
+                'input[inputmode="numeric"]',
+                'input[type="tel"]',
+                'input[type="text"]',
+            ):
+                loc = auth.locator(sel).first
+                try:
+                    if loc.is_visible(timeout=900):
+                        loc.click(timeout=4000)
+                        loc.fill(code, timeout=15000)
+                        D.delay_after_type(settings, log)
+                        _click_next_or_submit(page, settings, log)
+                        return
+                except Exception as e:
+                    last_err = str(e)
+                    continue
+
+            # 4) textbox по доступному имени (Code / Код …)
+            try:
+                tb = auth.get_by_role(
+                    "textbox",
+                    name=re.compile(
+                        r"code|код|sms|telegram|digit|цифр|подтвержд", re.I
+                    ),
+                ).first
+                if tb.is_visible(timeout=800):
+                    tb.click(timeout=4000)
+                    tb.fill(code, timeout=15000)
+                    D.delay_after_type(settings, log)
+                    _click_next_or_submit(page, settings, log)
+                    return
+            except Exception as e:
+                last_err = str(e)
+
+            # 5) Любой видимый input внутри auth (кроме hidden)
+            any_inp = auth.locator("input").filter(has_not=page.locator("[type='hidden']"))
+            ac = any_inp.count()
+            for i in range(min(ac, 12)):
+                loc = any_inp.nth(i)
+                try:
+                    if loc.is_visible(timeout=400):
+                        t = (loc.get_attribute("type") or "").lower()
+                        if t in ("checkbox", "radio", "submit", "button"):
+                            continue
+                        loc.click(timeout=3000)
+                        loc.fill(code, timeout=15000)
+                        D.delay_after_type(settings, log)
+                        _click_next_or_submit(page, settings, log)
+                        return
+                except Exception as e:
+                    last_err = str(e)
+        except Exception as e:
+            last_err = str(e)
+
+        time.sleep(0.45)
+
+    raise RuntimeError(
+        "Не найдено поле для кода входа в Telegram Web "
+        f"(вкладка {_AUTH_TAB}; последняя ошибка: {last_err or '—'})"
+    )
 
 
 def _maybe_cloud_password(
@@ -211,6 +338,7 @@ def run_telegram_web_login(
     D.delay_after_navigate(settings, log)
     _try_click_phone_login(page, settings, log)
     D.delay_after_navigate(settings, log)
+    _ensure_phone_form_visible(page, settings, log)
     if not _fill_phone_field(page, phone, settings, log):
         raise RuntimeError("Поле номера телефона в Telegram Web не найдено")
     _click_next_or_submit(page, settings, log)
