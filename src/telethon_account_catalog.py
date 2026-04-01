@@ -3,15 +3,68 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from rich.console import Console
 from rich.markup import escape
 from rich.prompt import Prompt
 from rich.table import Table
+from rich.text import Text
 
 from src.cli_input import strip_c0_controls
-from src.config import load_accounts
+from src.config import is_placeholder_proxy_url, load_accounts
+
+_MSK = ZoneInfo("Europe/Moscow")
+
+
+def _parse_iso_datetime(s: str) -> datetime | None:
+    t = (s or "").strip()
+    if len(t) < 10:
+        return None
+    if t.endswith("Z"):
+        t = t[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(t)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _format_ts_moscow(raw: str) -> str:
+    dt = _parse_iso_datetime(raw)
+    if dt:
+        return dt.astimezone(_MSK).strftime("%Y-%m-%d %H:%M МСК")
+    return ""
+
+
+def row_has_assigned_proxy(row: dict) -> bool:
+    p = row.get("proxy")
+    if not isinstance(p, str) or not p.strip():
+        return False
+    return not is_placeholder_proxy_url(p)
+
+
+def row_has_api_credentials(row: dict) -> bool:
+    aid = row.get("api_id")
+    ah = row.get("api_hash")
+    if aid is None or ah is None:
+        return False
+    if str(aid).strip() == "" or str(ah).strip() == "":
+        return False
+    try:
+        if int(aid) == 0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _yes_no_cell(yes: bool) -> Text:
+    return Text("да", style="green") if yes else Text("нет", style="dim")
 
 
 @dataclass(frozen=True)
@@ -70,19 +123,24 @@ def ids_to_session_names(
 
 
 def format_last_use_line(row: dict) -> str:
-    """Краткая строка для таблицы: last_used_* или legacy last_broadcast / last_mytg."""
+    """Краткая строка для таблицы: last_used_* или legacy last_broadcast / last_mytg (время — МСК)."""
     lu = row.get("last_used_at")
     lk = row.get("last_used_kind")
     if isinstance(lu, str) and lu.strip():
         kind = (lk if isinstance(lk, str) else "") or "?"
-        return f"{kind} {lu.strip()[:19]}"
+        ts_disp = _format_ts_moscow(lu.strip())
+        if ts_disp:
+            return f"{kind} {ts_disp}"
+        return f"{kind} {lu.strip()[:22]}"
     lb = row.get("last_broadcast_at")
     lm = row.get("last_mytg_at")
     bits: list[str] = []
     if isinstance(lb, str) and lb.strip():
-        bits.append(f"рассылка {lb.strip()[:19]}")
+        d = _format_ts_moscow(lb.strip()) or lb.strip()[:19]
+        bits.append(f"рассылка {d}")
     if isinstance(lm, str) and lm.strip():
-        bits.append(f"API {lm.strip()[:19]}")
+        d = _format_ts_moscow(lm.strip()) or lm.strip()[:19]
+        bits.append(f"mytg {d}")
     return " · ".join(bits) if bits else "—"
 
 
@@ -96,12 +154,14 @@ def mask_phone(phone: str | None) -> str:
 
 
 def print_account_catalog_table(console: Console, catalog: list[TelethonCatalogEntry]) -> None:
-    """Rich-таблица: id, session_name, phone, последнее использование."""
+    """Rich-таблица: id, session_name, phone, прокси/API, последнее использование (МСК)."""
     table = Table(title="Аккаунты (Telethon)")
     table.add_column("id", justify="right", style="cyan")
     table.add_column("session_name", style="bold")
     table.add_column("phone", style="dim")
-    table.add_column("последнее использование (UTC)", style="dim")
+    table.add_column("прокси", justify="center")
+    table.add_column("API", justify="center")
+    table.add_column("последнее использование (МСК)", style="dim")
 
     sn_counts: dict[str, int] = {}
     for e in catalog:
@@ -113,6 +173,8 @@ def print_account_catalog_table(console: Console, catalog: list[TelethonCatalogE
             str(e.display_id),
             escape(e.session_name) + warn,
             escape(mask_phone(e.row.get("phone"))),
+            _yes_no_cell(row_has_assigned_proxy(e.row)),
+            _yes_no_cell(row_has_api_credentials(e.row)),
             escape(format_last_use_line(e.row)),
         )
     console.print(table)
