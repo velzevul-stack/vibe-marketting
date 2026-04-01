@@ -1319,12 +1319,12 @@ def account_session_has_proxy(session_name: str) -> bool:
 
 
 def assign_sessions_bind_to_accounts(
-    entries: list[tuple[tuple[int, str], str, str]],
+    entries: list[tuple[tuple[int, str], str, str, str | None]],
     settings: Settings | None = None,
 ) -> tuple[bool, str]:
     """
     ``sessions_bind.txt``: для каждой строки записать ``api_id``, ``api_hash``, ``proxy``
-    в accounts.json и sidecar.
+    и при непустом четвёртом элементе кортежа — ``phone`` в accounts.json.
     """
     if not entries:
         return True, "sessions_bind: нечего назначать"
@@ -1337,13 +1337,15 @@ def assign_sessions_bind_to_accounts(
         name = (r.get("session_name") or "").strip()
         if name:
             by_name[name] = r
-    for (aid, ahash), proxy_url, stem in entries:
+    for (aid, ahash), proxy_url, stem, phone_opt in entries:
         row = by_name.get(stem)
         if not row:
             return False, f"Нет session_name={stem!r} в accounts.json (импортируйте ZIP)"
         row["api_id"] = int(aid)
         row["api_hash"] = str(ahash).strip()
         row["proxy"] = str(proxy_url).strip()
+        if phone_opt and str(phone_opt).strip():
+            row["phone"] = str(phone_opt).strip()
         write_api_to_session_sidecar(stem, aid, ahash, s)
         write_proxy_to_session_sidecar(stem, str(proxy_url).strip(), s)
     save_accounts_all(rows)

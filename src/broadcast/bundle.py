@@ -254,19 +254,20 @@ def parse_apis_sessions_file(path: Path) -> tuple[dict[str, tuple[int, str]], li
 
 def parse_sessions_bind_file(
     path: Path,
-) -> tuple[list[tuple[tuple[int, str], str, str]], list[str]]:
+) -> tuple[list[tuple[tuple[int, str], str, str, str | None]], list[str]]:
     """
-    Файл ``sessions_bind.txt``: по строке на аккаунт — три поля через пробелы::
+    Файл ``sessions_bind.txt``: по строке на аккаунт — поля через пробелы::
 
-        api_id:api_hash <прокси_одной_строкой> <stem_сессии>
+        api_id:api_hash <прокси_одной_строкой> <stem_сессии> [<phone>]
 
     Прокси без пробелов: ``socks5://...`` или ``host:port:user:pass``.
-    Возвращает список ``((api_id, api_hash), proxy_url, session_stem)`` и ошибки.
+    Четвёртое поле — телефон в международном формате (без пробелов), опционально.
+    Возвращает список ``((api_id, api_hash), proxy_url, session_stem, phone|None)``.
     """
     p = Path(path)
     if not p.is_file():
         return [], []
-    out: list[tuple[tuple[int, str], str, str]] = []
+    out: list[tuple[tuple[int, str], str, str, str | None]] = []
     errs: list[str] = []
     seen_stems: set[str] = set()
     try:
@@ -277,14 +278,18 @@ def parse_sessions_bind_file(
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        parts = line.split(None, 2)
-        if len(parts) != 3:
+        parts = line.split(None, 3)
+        if len(parts) < 3:
             errs.append(
-                f"{p.name}:{i}: ожидается ровно 3 поля: "
-                f"api_id:api_hash <прокси> <stem> — получено {len(parts)}"
+                f"{p.name}:{i}: минимум 3 поля: "
+                f"api_id:api_hash <прокси> <stem> [phone] — получено {len(parts)}"
             )
             continue
         cred_s, proxy_raw, stem = parts[0], parts[1].strip(), parts[2].strip()
+        phone_opt: str | None = None
+        if len(parts) == 4:
+            p4 = parts[3].strip()
+            phone_opt = p4 if p4 else None
         cred = parse_api_credentials_line(cred_s)
         if not cred:
             errs.append(f"{p.name}:{i}: неверная пара api_id:api_hash ({cred_s!r})")
@@ -300,5 +305,5 @@ def parse_sessions_bind_file(
             errs.append(f"{p.name}: stem {stem!r} встречается дважды")
             continue
         seen_stems.add(stem)
-        out.append((cred, norm, stem))
+        out.append((cred, norm, stem, phone_opt))
     return out, errs

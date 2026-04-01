@@ -36,7 +36,7 @@ def apply_package_api_proxy_assignments(
     stem_to_proxy_file: dict[str, Path],
 ) -> bool:
     """
-    Порядок: ``sessions_bind.txt`` (api+proxy+сессия) → ``apis_sessions.txt`` (только api, без стемов из bind)
+    Порядок: ``sessions_bind.txt`` (api+proxy+сессия[+телефон]) → ``apis_sessions.txt`` (только api, без стемов из bind)
     → RR ``apis.txt`` для импортированных без api → RR ``proxy.txt``/``proxies.txt`` для импортированных без прокси.
     """
     bind_path = root / SESSIONS_BIND_FILENAME
@@ -45,7 +45,7 @@ def apply_package_api_proxy_assignments(
         console.print(f"[red]{escape(e)}[/]")
     if bind_errs:
         return False
-    bind_stems = {stem for _, _, stem in bind_rows}
+    bind_stems = {stem for _, _, stem, _ in bind_rows}
     if bind_rows:
         ok_b, msg_b = assign_sessions_bind_to_accounts(bind_rows, sett)
         if not ok_b:
