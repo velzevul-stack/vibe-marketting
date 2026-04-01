@@ -19,6 +19,7 @@ from rich.prompt import Prompt, Confirm
 
 from src.config import (
     Settings,
+    account_row_for_session_name,
     accounts_json_path,
     assign_apis_fill_missing_in_accounts,
     assign_apis_round_robin_to_accounts,
@@ -41,6 +42,7 @@ from src.config import (
     set_telethon_default_api,
     strip_api_credentials_from_accounts,
     telethon_session_dir_path,
+    touch_accounts_last_use,
     upsert_telethon_account,
     wipe_telethon_session_files,
 )
@@ -62,7 +64,12 @@ from src.invite import InviteManager, AccountPool
 from src.telethon_session_menu import login_client_for_one_off_scrape, run_telethon_session_menu
 from src.accounts_bulk_prepare import run_bulk_account_prepare
 from src.session_sync import sync_sessions_dir_to_accounts
-from src.cli_input import parse_api_id_digits, parse_nonneg_int_clamped, strip_c0_controls
+from src.cli_input import (
+    digits_only,
+    parse_api_id_digits,
+    parse_nonneg_int_clamped,
+    strip_c0_controls,
+)
 from src.ui.progress_util import console_loading
 from telethon import TelegramClient
 
@@ -93,6 +100,39 @@ def _prompt_nonneg_int(
         minimum=minimum,
         maximum=maximum,
     )
+
+
+def _account_activity_hint(row: dict) -> str:
+    lb = row.get("last_broadcast_at")
+    lm = row.get("last_mytg_at")
+    bits: list[str] = []
+    if isinstance(lb, str) and lb.strip():
+        bits.append(f"рассылка {lb.strip()[:19]}")
+    if isinstance(lm, str) and lm.strip():
+        bits.append(f"API {lm.strip()[:19]}")
+    return " · ".join(bits)
+
+
+def _prompt_max_accounts_subset(n_total: int) -> int | None:
+    """Пустой ввод — все аккаунты; иначе число от 1 до n_total."""
+    raw = strip_c0_controls(
+        Prompt.ask(
+            f"Сколько аккаунтов за этот прогон (1–{n_total}; Enter = все)",
+            default="",
+        ).strip()
+    )
+    if not raw:
+        return None
+    d = digits_only(raw)
+    if not d:
+        return None
+    try:
+        v = int(d)
+    except ValueError:
+        return None
+    if v < 1:
+        return 1
+    return min(n_total, v)
 
 
 def _emit_zero_search_diagnostics(search_diag: dict, search_fail: str | None) -> None:
@@ -523,7 +563,11 @@ def _run_settings_submenu() -> None:
 
 def _run_mytelegram_api_placeholder() -> None:
     """Playwright: Telegram Web → пауза → my.telegram.org → запись api_id/api_hash."""
-    from src.mytelegram_portal.runner import run_mytg_menu_flow
+    from src.mytelegram_portal.runner import (
+        collect_jobs_from_accounts,
+        collect_jobs_from_session_files,
+        run_mytg_menu_flow,
+    )
 
     console.print()
     console.print("[bold white]── API my.telegram.org (Playwright) ──[/]")
@@ -535,7 +579,7 @@ def _run_mytelegram_api_placeholder() -> None:
     )
     console.print(
         "[dim]Источник A —[/] [bold]accounts.json[/]: session_name + phone + proxy. "
-        "Источник B —[/] папка [bold]*.session[/]: имя = 8–15 цифр номера [dim](можно с + в начале)[/], "
+        "[dim]Источник B —[/] папка [bold]*.session[/]: имя = 8–15 цифр номера [dim](можно с + в начале)[/], "
         "прокси round-robin из [cyan]config/proxies.txt[/]."
     )
     console.print(f"{_mk('0')} Назад")
@@ -557,11 +601,30 @@ def _run_mytelegram_api_placeholder() -> None:
         "6": ("full", True),
     }
     mode, from_sess = mode_map[sub]
+    sett = Settings()
+    if from_sess:
+        jobs_preview = collect_jobs_from_session_files(sett, console)
+    else:
+        jobs_preview = collect_jobs_from_accounts(console, _PROJECT_ROOT)
+    max_accounts: int | None = None
+    if jobs_preview:
+        console.print("[dim]Порядок прогона; последняя активность в accounts.json (UTC):[/]")
+        cap = 40
+        for i, job in enumerate(jobs_preview[:cap], 1):
+            row = account_row_for_session_name(job.session_name) or {}
+            hint = _account_activity_hint(row)
+            extra = f" [dim]{escape(hint)}[/]" if hint else ""
+            console.print(f"  [cyan]{i}[/]  {escape(job.session_name)}{extra}")
+        if len(jobs_preview) > cap:
+            console.print(f"  [dim]… ещё {len(jobs_preview) - cap}[/]")
+        max_accounts = _prompt_max_accounts_subset(len(jobs_preview))
     try:
         run_mytg_menu_flow(
             console,
+            settings=sett,
             mode=mode,  # type: ignore[arg-type]
             from_session_files=from_sess,
+            max_accounts=max_accounts,
         )
     except KeyboardInterrupt:
         console.print("\n[yellow]Прервано.[/]")
@@ -727,6 +790,29 @@ def _run_broadcast_from_bundle_menu() -> None:
             console.print("[red]Нет аккаунтов в accounts.json после импорта.[/]")
             Prompt.ask("\n[dim]Enter — назад[/]", default="")
             return
+        accs_all = load_accounts()
+        console.print("[dim]Аккаунты как в accounts.json; подсказка — последняя рассылка / API (UTC):[/]")
+        for i, a in enumerate(accs_all, 1):
+            name = a.get("session_name", "?")
+            hint = _account_activity_hint(a)
+            extra = f" [dim]{escape(hint)}[/]" if hint else ""
+            console.print(f"  [cyan]{i}[/]  {escape(str(name))}{extra}")
+        cap = _prompt_max_accounts_subset(len(accs_all))
+        if cap is not None:
+            chosen = accs_all[:cap]
+            sns = frozenset(
+                (x.get("session_name") or "").strip()
+                for x in chosen
+                if (x.get("session_name") or "").strip()
+            )
+            if not sns:
+                console.print("[red]Не удалось выбрать session_name для подмножества.[/]")
+                Prompt.ask("\n[dim]Enter — назад[/]", default="")
+                return
+            broadcast_extra_kw["only_session_names"] = sns
+            console.print(
+                f"[dim]В этом прогоне:[/] [cyan]{len(sns)}[/] [dim]аккаунтов из[/] [cyan]{len(accs_all)}[/]"
+            )
     elif acc_mode == "2":
         accs_pick = load_accounts()
         if not accs_pick:
@@ -737,7 +823,9 @@ def _run_broadcast_from_bundle_menu() -> None:
             return
         for i, a in enumerate(accs_pick, 1):
             name = a.get("session_name", "?")
-            console.print(f"  [cyan]{i}[/]  {escape(str(name))}")
+            hint = _account_activity_hint(a)
+            extra = f" [dim]{escape(hint)}[/]" if hint else ""
+            console.print(f"  [cyan]{i}[/]  {escape(str(name))}{extra}")
         pick = _prompt_nonneg_int(
             "Номер аккаунта для рассылки",
             default=1,
@@ -889,6 +977,15 @@ def _run_broadcast_from_bundle_menu() -> None:
             console.print(
                 f"  [dim]{escape(str(sn))}:[/] ok={s} fail={f} skip={sk} privacy={pr} "
                 f"daily_cap={dc} relay={rx}"
+            )
+    if totals.by_session:
+        n_touch = touch_accounts_last_use(
+            list(totals.by_session.keys()), kind="broadcast"
+        )
+        if n_touch:
+            console.print(
+                f"[dim]В accounts.json обновлено[/] [cyan]last_broadcast_at[/]: "
+                f"[white]{n_touch}[/] [dim]записей[/]"
             )
     Prompt.ask("\n[dim]Enter — назад[/]", default="")
 

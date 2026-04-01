@@ -20,6 +20,7 @@ from src.config import (
     load_proxy_pool_from_config,
     normalize_proxy_line,
     telethon_session_dir_path,
+    touch_accounts_last_use,
     upsert_telethon_account,
     write_api_to_session_sidecar,
 )
@@ -183,6 +184,7 @@ def run_mytg_menu_flow(
     mode: Mode = "full",
     jobs_override: list[AccountJob] | None = None,
     from_session_files: bool = False,
+    max_accounts: int | None = None,
 ) -> int:
     """
     mode:
@@ -191,6 +193,7 @@ def run_mytg_menu_flow(
       full — фаза 1, опциональная пауза, фаза 2.
 
     ``from_session_files`` — брать номер из имени ``*.session`` (8–15 цифр), прокси RR из config.
+    ``max_accounts`` — не больше первых N задач в порядке списка (None = все).
     """
     sett = settings or Settings()
     root = project_root or _project_root()
@@ -224,8 +227,19 @@ def run_mytg_menu_flow(
             )
         return 1
 
+    if max_accounts is not None and max_accounts > 0:
+        before = len(jobs)
+        jobs = jobs[:max_accounts]
+        console.print(
+            f"[dim]За прогон:[/] [cyan]{len(jobs)}[/] из [cyan]{before}[/] "
+            f"[dim](ограничение max_accounts)[/]"
+        )
+
     prev = load_portal_state(spath)
     state = _merge_state_with_jobs(prev, jobs)
+    if max_accounts is not None:
+        allowed = {j.session_name for j in jobs}
+        state.accounts = [a for a in state.accounts if a.session_name in allowed]
     save_portal_state(spath, state)
 
     user_agents = [
@@ -343,6 +357,7 @@ def run_mytg_menu_flow(
                         )
                         job.status = "api_ok"
                         job.last_error = None
+                        touch_accounts_last_use([job.session_name], kind="mytg")
                         lg(f"api_id={api_id} записан в accounts.json")
                     except Exception as e:
                         job.status = "failed"

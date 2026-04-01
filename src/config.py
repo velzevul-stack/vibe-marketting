@@ -1130,6 +1130,7 @@ def upsert_telethon_account(
     name = (session_name or "").strip()
     if not name:
         raise ValueError("session_name пустой")
+    prev = account_row_for_session_name(name)
     rows = load_accounts_all()
     rows = [
         r
@@ -1145,8 +1146,47 @@ def upsert_telethon_account(
         entry["phone"] = str(phone).strip()
     if proxy and str(proxy).strip():
         entry["proxy"] = str(proxy).strip()
+    if prev:
+        for _k in ("last_broadcast_at", "last_mytg_at"):
+            v = prev.get(_k)
+            if isinstance(v, str) and v.strip():
+                entry[_k] = v.strip()
     rows.append(entry)
     save_accounts_all(rows)
+
+
+def touch_accounts_last_use(
+    session_names: list[str] | set[str] | frozenset[str],
+    *,
+    kind: str,
+) -> int:
+    """
+    Проставить время последнего использования в accounts.json.
+
+    kind: ``broadcast`` → ``last_broadcast_at``, ``mytg`` → ``last_mytg_at`` (UTC ISO-8601).
+    Возвращает число обновлённых строк (только существующие session_name).
+    """
+    from datetime import datetime, timezone
+
+    key = "last_broadcast_at" if kind == "broadcast" else "last_mytg_at"
+    if key not in ("last_broadcast_at", "last_mytg_at"):
+        raise ValueError(f"unknown kind: {kind!r}")
+    want = {str(s).strip() for s in session_names if s and str(s).strip()}
+    if not want:
+        return 0
+    ts = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    rows = load_accounts_all()
+    n = 0
+    for r in rows:
+        if not isinstance(r, dict) or r.get("_template"):
+            continue
+        sn = (r.get("session_name") or "").strip()
+        if sn in want:
+            r[key] = ts
+            n += 1
+    if n:
+        save_accounts_all(rows)
+    return n
 
 
 def session_bind_file_path() -> Path:
