@@ -39,7 +39,14 @@ def _run_startup_session_sync() -> None:
         con.print(f"[red]sync_sessions: {e}[/]")
 
 
-def _cli_mytg(*, phase1: bool, phase2: bool, full: bool, state: str | None) -> int:
+def _cli_mytg(
+    *,
+    phase1: bool,
+    phase2: bool,
+    full: bool,
+    state: str | None,
+    from_session_files: bool,
+) -> int:
     from pathlib import Path
 
     from src.mytelegram_portal.runner import run_mytg_cli
@@ -49,7 +56,11 @@ def _cli_mytg(*, phase1: bool, phase2: bool, full: bool, state: str | None) -> i
         return 2
     mode = "phase1" if phase1 else "phase2" if phase2 else "full"
     sp = Path(state).expanduser() if state else None
-    return run_mytg_cli(mode=mode, state_path=sp)
+    return run_mytg_cli(
+        mode=mode,
+        state_path=sp,
+        from_session_files=from_session_files,
+    )
 
 
 def _parse_csv_minutes_interval(spec: str, *, flag: str) -> tuple[float, float | None]:
@@ -719,6 +730,11 @@ def main() -> None:
         default=None,
         help="Путь к mytelegram_portal_state.json (по умолчанию output/mytegram_portal_state.json)",
     )
+    parser.add_argument(
+        "--mytg-from-sessions",
+        action="store_true",
+        help="Список из *.session: телефон = 8–15 цифр в имени файла (+ добавляется), прокси RR из config/proxies.txt",
+    )
     args = parser.parse_args()
     if args.proxy is not None:
         raise SystemExit(_cli_proxy_state(args.proxy))
@@ -778,6 +794,7 @@ def main() -> None:
             phase2=args.mytg_phase2,
             full=args.mytg_full,
             state=args.mytg_state,
+            from_session_files=args.mytg_from_sessions,
         )
         if code == 2:
             parser.error(

@@ -528,22 +528,41 @@ def _run_mytelegram_api_placeholder() -> None:
     console.print()
     console.print("[bold white]── API my.telegram.org (Playwright) ──[/]")
     console.print(
-        "[dim]Фаза 1:[/] вход в [cyan]web.telegram.org/k[/] под прокси из accounts.json, "
-        "код из консоли → сохраняется профиль браузера. "
-        "[dim]Фаза 2:[/] [cyan]my.telegram.org[/], код из Web (или вручную) → [cyan]accounts.json[/]. "
-        "Нужны [bold]session_name[/], [bold]phone[/], [bold]proxy[/] у каждой строки. "
-        "См. [bold]mytg_*[/] в settings.json."
+        "[dim]Фаза 1:[/] вход в [cyan]web.telegram.org/k[/] по номеру, код **в консоль** → "
+        "[cyan]output/mytg_web_storage/[/]. "
+        "[dim]Фаза 2:[/] [cyan]my.telegram.org[/] → [cyan]accounts.json[/] + sidecar. "
+        "[bold]mytg_*[/] в settings.json; сервер: [dim]xvfb-run[/] + [bold]mytg_headless: false[/]."
+    )
+    console.print(
+        "[dim]Источник A —[/] [bold]accounts.json[/]: session_name + phone + proxy. "
+        "Источник B —[/] папка [bold]*.session[/]: имя = 8–15 цифр номера [dim](можно с + в начале)[/], "
+        "прокси round-robin из [cyan]config/proxies.txt[/]."
     )
     console.print(f"{_mk('0')} Назад")
-    console.print(f"{_mk('1')} Только фаза 1 — Telegram Web [dim](storage_state)[/]")
-    console.print(f"{_mk('2')} Только фаза 2 — my.telegram.org [dim](нужен state после фазы 1)[/]")
-    console.print(f"{_mk('3')} Полный цикл [dim](фаза 1 → опц. ожидание → фаза 2)[/]")
-    sub = Prompt.ask("Выбор", choices=["0", "1", "2", "3"], default="0")
+    console.print(f"{_mk('1')} Фаза 1 [dim](accounts.json)[/]")
+    console.print(f"{_mk('2')} Фаза 2 [dim](accounts.json)[/]")
+    console.print(f"{_mk('3')} Полный [dim](accounts.json)[/]")
+    console.print(f"{_mk('4')} Фаза 1 [dim](*.session + proxies.txt)[/]")
+    console.print(f"{_mk('5')} Фаза 2 [dim](*.session + proxies.txt)[/]")
+    console.print(f"{_mk('6')} Полный [dim](*.session + proxies.txt)[/]")
+    sub = Prompt.ask("Выбор", choices=["0", "1", "2", "3", "4", "5", "6"], default="0")
     if sub == "0":
         return
-    mode = {"1": "phase1", "2": "phase2", "3": "full"}[sub]
+    mode_map = {
+        "1": ("phase1", False),
+        "2": ("phase2", False),
+        "3": ("full", False),
+        "4": ("phase1", True),
+        "5": ("phase2", True),
+        "6": ("full", True),
+    }
+    mode, from_sess = mode_map[sub]
     try:
-        run_mytg_menu_flow(console, mode=mode)  # type: ignore[arg-type]
+        run_mytg_menu_flow(
+            console,
+            mode=mode,  # type: ignore[arg-type]
+            from_session_files=from_sess,
+        )
     except KeyboardInterrupt:
         console.print("\n[yellow]Прервано.[/]")
     Prompt.ask("\n[dim]Enter — назад[/]", default="")

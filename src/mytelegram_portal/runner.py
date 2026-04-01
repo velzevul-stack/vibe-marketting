@@ -11,13 +11,15 @@ from rich.markup import escape
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.prompt import Confirm, Prompt
 
-from src.cli_input import strip_c0_controls
+from src.cli_input import digits_only, strip_c0_controls
 from src.config import (
     Settings,
     effective_2fa_password,
     is_placeholder_proxy_url,
     load_accounts_all,
+    load_proxy_pool_from_config,
     normalize_proxy_line,
+    telethon_session_dir_path,
     upsert_telethon_account,
     write_api_to_session_sidecar,
 )
@@ -42,6 +44,71 @@ def _project_root(console: Console | None = None) -> Path:
 
 def _log_line(console: Console, session: str, msg: str) -> None:
     console.print(f"[dim][mytg][/] [cyan]{escape(session)}[/] {escape(msg)}")
+
+
+def phone_e164_from_session_stem(stem: str) -> str | None:
+    """
+    Имя файла сессии без расширения → телефон для Web/Telegram (+E.164).
+
+    Допускается ведущий ``+`` (как в ``+123456789012.session``), иначе только цифры.
+    Суффикс коллизии: ``+375…_a3f2`` или ``375…_a3f2`` → номер до ``_``.
+    """
+    raw = (stem or "").strip()
+    if not raw:
+        return None
+    base = raw.split("_", 1)[0].strip()
+    d = digits_only(base)
+    if len(d) < 8 or len(d) > 15:
+        return None
+    return f"+{d}"
+
+
+def collect_jobs_from_session_files(
+    settings: Settings,
+    console: Console,
+) -> list[AccountJob]:
+    """
+    Список задач: каждый ``*.session`` в ``telethon_session_dir``;
+    имя = E.164 в цифрах, опционально с ``+`` в начале (напр. ``+123….session``);
+    прокси — round-robin из пула (proxies.txt / settings), без placeholder.
+    """
+    pool = [
+        p
+        for p in load_proxy_pool_from_config()
+        if p and not is_placeholder_proxy_url(p)
+    ]
+    if not pool:
+        console.print(
+            "[red]Пул прокси пуст или только заглушки.[/] Заполните [cyan]config/proxies.txt[/] "
+            "или [cyan]proxies.list[/] в settings.json."
+        )
+        return []
+    sess_dir = telethon_session_dir_path(settings)
+    paths = sorted(sess_dir.glob("*.session"), key=lambda p: p.stem.lower())
+    jobs: list[AccountJob] = []
+    for i, p in enumerate(paths):
+        stem = p.stem
+        phone = phone_e164_from_session_stem(stem)
+        if not phone:
+            _log_line(
+                console,
+                stem,
+                "пропуск: после +/_ не 8–15 цифр E.164 в имени файла",
+            )
+            continue
+        raw_px = pool[i % len(pool)]
+        px = normalize_proxy_line(raw_px) or raw_px
+        if "://" not in px and px:
+            px = f"http://{px}"
+        jobs.append(
+            AccountJob(
+                session_name=stem,
+                phone=phone,
+                proxy_url=px,
+                status="pending",
+            )
+        )
+    return jobs
 
 
 def collect_jobs_from_accounts(console: Console, project_root: Path) -> list[AccountJob]:
@@ -115,12 +182,15 @@ def run_mytg_menu_flow(
     state_path: Path | None = None,
     mode: Mode = "full",
     jobs_override: list[AccountJob] | None = None,
+    from_session_files: bool = False,
 ) -> int:
     """
     mode:
       phase1 — только Telegram Web + storage_state;
       phase2 — только my.telegram.org (нужен state с web_ok);
       full — фаза 1, опциональная пауза, фаза 2.
+
+    ``from_session_files`` — брать номер из имени ``*.session`` (8–15 цифр), прокси RR из config.
     """
     sett = settings or Settings()
     root = project_root or _project_root()
@@ -135,9 +205,23 @@ def run_mytg_menu_flow(
         )
         return 1
 
-    jobs = jobs_override or collect_jobs_from_accounts(console, root)
+    if jobs_override is not None:
+        jobs = jobs_override
+    elif from_session_files:
+        jobs = collect_jobs_from_session_files(sett, console)
+    else:
+        jobs = collect_jobs_from_accounts(console, root)
     if not jobs:
-        console.print("[yellow]Нет аккаунтов с session_name + phone + proxy.[/]")
+        if from_session_files:
+            console.print(
+                "[yellow]Нет подходящих *.session[/] в папке сессий "
+                f"[cyan]{telethon_session_dir_path(sett)}[/] "
+                "[dim](имя = 8–15 цифр номера, можно с ведущим +)[/]."
+            )
+        else:
+            console.print(
+                "[yellow]Нет строк в accounts.json[/] с [bold]session_name[/] + [bold]phone[/] + [bold]proxy[/]."
+            )
         return 1
 
     prev = load_portal_state(spath)
@@ -300,6 +384,7 @@ def run_mytg_cli(
     mode: Mode,
     state_path: Path | None,
     project_root: Path | None = None,
+    from_session_files: bool = False,
 ) -> int:
     from rich.console import Console
 
@@ -311,4 +396,5 @@ def run_mytg_cli(
         project_root=root,
         state_path=sp,
         mode=mode,
+        from_session_files=from_session_files,
     )
