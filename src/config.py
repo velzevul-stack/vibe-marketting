@@ -1147,12 +1147,23 @@ def upsert_telethon_account(
     if proxy and str(proxy).strip():
         entry["proxy"] = str(proxy).strip()
     if prev:
-        for _k in ("last_broadcast_at", "last_mytg_at"):
+        for _k in (
+            "last_broadcast_at",
+            "last_mytg_at",
+            "last_used_at",
+            "last_used_kind",
+        ):
             v = prev.get(_k)
             if isinstance(v, str) and v.strip():
                 entry[_k] = v.strip()
     rows.append(entry)
     save_accounts_all(rows)
+
+
+_LEGACY_TOUCH_KEYS: dict[str, str] = {
+    "broadcast": "last_broadcast_at",
+    "mytg": "last_mytg_at",
+}
 
 
 def touch_accounts_last_use(
@@ -1161,20 +1172,21 @@ def touch_accounts_last_use(
     kind: str,
 ) -> int:
     """
-    Проставить время последнего использования в accounts.json.
+    Проставить ``last_used_at`` / ``last_used_kind`` и при необходимости legacy-поля.
 
-    kind: ``broadcast`` → ``last_broadcast_at``, ``mytg`` → ``last_mytg_at`` (UTC ISO-8601).
-    Возвращает число обновлённых строк (только существующие session_name).
+    Для ``kind`` ``broadcast`` / ``mytg`` также обновляются ``last_broadcast_at`` /
+    ``last_mytg_at``. Возвращает число обновлённых строк.
     """
     from datetime import datetime, timezone
 
-    key = "last_broadcast_at" if kind == "broadcast" else "last_mytg_at"
-    if key not in ("last_broadcast_at", "last_mytg_at"):
-        raise ValueError(f"unknown kind: {kind!r}")
+    k = (kind or "").strip()
+    if not k or len(k) > 48:
+        raise ValueError("kind: непустая строка до 48 символов")
     want = {str(s).strip() for s in session_names if s and str(s).strip()}
     if not want:
         return 0
     ts = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    legacy_key = _LEGACY_TOUCH_KEYS.get(k)
     rows = load_accounts_all()
     n = 0
     for r in rows:
@@ -1182,7 +1194,10 @@ def touch_accounts_last_use(
             continue
         sn = (r.get("session_name") or "").strip()
         if sn in want:
-            r[key] = ts
+            r["last_used_at"] = ts
+            r["last_used_kind"] = k
+            if legacy_key:
+                r[legacy_key] = ts
             n += 1
     if n:
         save_accounts_all(rows)

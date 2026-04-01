@@ -22,6 +22,7 @@ from src.config import (
     proxy_url_to_telethon,
     session_bind_file_path,
     telethon_session_dir_path,
+    touch_accounts_last_use,
     upsert_telethon_account,
 )
 from src.telethon_client_factory import telegram_client
@@ -201,6 +202,10 @@ def _append_account(
     upsert_telethon_account(
         session_name, api_id, api_hash, phone=phone, proxy=proxy
     )
+    try:
+        touch_accounts_last_use([session_name], kind="session_menu")
+    except Exception:
+        pass
 
 
 async def _list_sessions_console(console) -> None:
@@ -645,6 +650,10 @@ async def _auto_bind_sessions_console(console) -> None:
             return
         for name in missing:
             upsert_telethon_account(name, aid, ahash)
+        try:
+            touch_accounts_last_use(list(missing), kind="session_menu")
+        except Exception:
+            pass
         console.print(f"[green]Готово: {accounts_json_path()}[/]")
         return
 
@@ -691,6 +700,10 @@ async def _auto_bind_sessions_console(console) -> None:
 
     for name, aid, ahash, phone in to_apply:
         upsert_telethon_account(name, aid, ahash, phone=phone)
+    try:
+        touch_accounts_last_use([n for n, _, _, _ in to_apply], kind="session_menu")
+    except Exception:
+        pass
     console.print(f"[green]Готово: {accounts_json_path()}[/]")
 
 

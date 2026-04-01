@@ -4,7 +4,7 @@
     "_template": true
   },
   {
-    "_comment_account": "Поле proxy не копируйте из шаблона. Либо меню 9→2→2 «Назначить прокси» (из proxies.txt), либо реальный URL; иначе Telethon будет лезть на выдуманный хост. Опционально last_broadcast_at / last_mytg_at (UTC ISO) проставляет меню после рассылки и после API my.telegram.org.",
+    "_comment_account": "Поле proxy не копируйте из шаблона. Либо меню 9→2→2 «Назначить прокси» (из proxies.txt), либо реальный URL; иначе Telethon будет лезть на выдуманный хост. Опционально: last_used_at + last_used_kind (последняя операция), last_broadcast_at / last_mytg_at — см. меню и CLI.",
     "session_name": "account1",
     "api_id": 12345678,
     "api_hash": "abcdef1234567890abcdef1234567890",

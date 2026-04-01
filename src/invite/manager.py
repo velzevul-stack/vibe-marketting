@@ -23,6 +23,7 @@ from src.config import (
     proxy_url_to_telethon,
     Settings,
     telethon_session_file,
+    touch_accounts_last_use,
 )
 from src.telethon_client_factory import telegram_client
 from src.telethon_flood_wait import flood_wait_seconds, sleep_flood_wait
@@ -42,7 +43,8 @@ class AccountState:
 class AccountPool:
     """Умное распределение между аккаунтами и прокси."""
 
-    def __init__(self):
+    def __init__(self, only_session_names: frozenset[str] | None = None):
+        self._only_session_names = only_session_names
         self.accounts: list[AccountState] = []
         self._proxy_pool: list[str] = []
         self._proxy_index: int = 0
@@ -52,6 +54,13 @@ class AccountPool:
     def _load(self) -> None:
         """Загрузить аккаунты и пул прокси."""
         accs = load_accounts()
+        if self._only_session_names:
+            allow = self._only_session_names
+            accs = [
+                a
+                for a in accs
+                if (a.get("session_name") or "").strip() in allow
+            ]
         for a in accs:
             self.accounts.append(AccountState(session_name=a.get("session_name", "default")))
         self._proxy_pool = load_proxies()
@@ -225,9 +234,14 @@ _JOIN_TRANSIENT_RETRIES = 3
 class InviteManager:
     """Управление приглашениями с умным распределением."""
 
-    def __init__(self, settings: Settings | None = None):
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        *,
+        only_session_names: frozenset[str] | None = None,
+    ):
         self.settings = settings or Settings()
-        self.pool = AccountPool()
+        self.pool = AccountPool(only_session_names=only_session_names)
 
     async def add_to_contacts(self, username: str) -> bool:
         """Добавить пользователя в контакты (аккаунт — least-used из пула)."""
@@ -274,6 +288,10 @@ class InviteManager:
                 )
             )
             self.pool.mark_used(session_name)
+            try:
+                touch_accounts_last_use([session_name], kind="contacts")
+            except Exception:
+                pass
             return True
         except FloodWaitError as e:
             sec = flood_wait_seconds(e)
@@ -362,9 +380,17 @@ class InviteManager:
                     entity = await client.get_entity(link_clean)
                     await client(JoinChannelRequest(entity))
                 self.pool.mark_used(session_name)
+                try:
+                    touch_accounts_last_use([session_name], kind="join")
+                except Exception:
+                    pass
                 return True, session_name, ""
             except UserAlreadyParticipantError:
                 self.pool.mark_used(session_name)
+                try:
+                    touch_accounts_last_use([session_name], kind="join")
+                except Exception:
+                    pass
                 return True, session_name, ""
             except FloodWaitError as e:
                 sec = flood_wait_seconds(e)
@@ -442,6 +468,11 @@ class InviteManager:
                         self.settings.delay_invite_max,
                     )
                     await asyncio.sleep(delay)
+            if invited > 0:
+                try:
+                    touch_accounts_last_use([session_name], kind="invite")
+                except Exception:
+                    pass
             return invited, session_name
         except Exception:
             return 0, session_name

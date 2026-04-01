@@ -17,6 +17,13 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskPr
 from rich.table import Table
 from rich.prompt import Prompt, Confirm
 
+from src.telethon_account_catalog import (
+    build_telethon_catalog,
+    format_last_use_line,
+    print_account_catalog_table,
+    prompt_account_scope,
+    prompt_row_indices_scope,
+)
 from src.config import (
     Settings,
     account_row_for_session_name,
@@ -46,6 +53,8 @@ from src.config import (
     upsert_telethon_account,
     wipe_telethon_session_files,
 )
+from src.jobs.launcher import spawn_worker_job
+from src.jobs.registry import read_recent_registry_entries, pid_alive
 from src.account_zip_import import import_sessions_zip, print_zip_import_report
 from src.broadcast.bundle import (
     discover_campaign_import_slices,
@@ -64,12 +73,7 @@ from src.invite import InviteManager, AccountPool
 from src.telethon_session_menu import login_client_for_one_off_scrape, run_telethon_session_menu
 from src.accounts_bulk_prepare import run_bulk_account_prepare
 from src.session_sync import sync_sessions_dir_to_accounts
-from src.cli_input import (
-    digits_only,
-    parse_api_id_digits,
-    parse_nonneg_int_clamped,
-    strip_c0_controls,
-)
+from src.cli_input import parse_api_id_digits, parse_nonneg_int_clamped, strip_c0_controls
 from src.ui.progress_util import console_loading
 from telethon import TelegramClient
 
@@ -100,39 +104,6 @@ def _prompt_nonneg_int(
         minimum=minimum,
         maximum=maximum,
     )
-
-
-def _account_activity_hint(row: dict) -> str:
-    lb = row.get("last_broadcast_at")
-    lm = row.get("last_mytg_at")
-    bits: list[str] = []
-    if isinstance(lb, str) and lb.strip():
-        bits.append(f"рассылка {lb.strip()[:19]}")
-    if isinstance(lm, str) and lm.strip():
-        bits.append(f"API {lm.strip()[:19]}")
-    return " · ".join(bits)
-
-
-def _prompt_max_accounts_subset(n_total: int) -> int | None:
-    """Пустой ввод — все аккаунты; иначе число от 1 до n_total."""
-    raw = strip_c0_controls(
-        Prompt.ask(
-            f"Сколько аккаунтов за этот прогон (1–{n_total}; Enter = все)",
-            default="",
-        ).strip()
-    )
-    if not raw:
-        return None
-    d = digits_only(raw)
-    if not d:
-        return None
-    try:
-        v = int(d)
-    except ValueError:
-        return None
-    if v < 1:
-        return 1
-    return min(n_total, v)
 
 
 def _emit_zero_search_diagnostics(search_diag: dict, search_fail: str | None) -> None:
@@ -606,25 +577,55 @@ def _run_mytelegram_api_placeholder() -> None:
         jobs_preview = collect_jobs_from_session_files(sett, console)
     else:
         jobs_preview = collect_jobs_from_accounts(console, _PROJECT_ROOT)
-    max_accounts: int | None = None
+    jobs_override_mytg = None
     if jobs_preview:
-        console.print("[dim]Порядок прогона; последняя активность в accounts.json (UTC):[/]")
+        console.print("[dim]Задачи (нумерация = порядок прогона):[/]")
         cap = 40
         for i, job in enumerate(jobs_preview[:cap], 1):
             row = account_row_for_session_name(job.session_name) or {}
-            hint = _account_activity_hint(row)
-            extra = f" [dim]{escape(hint)}[/]" if hint else ""
+            hint = format_last_use_line(row)
+            extra = (
+                f" [dim]{escape(hint)}[/]"
+                if hint and hint != "—"
+                else ""
+            )
             console.print(f"  [cyan]{i}[/]  {escape(job.session_name)}{extra}")
         if len(jobs_preview) > cap:
             console.print(f"  [dim]… ещё {len(jobs_preview) - cap}[/]")
-        max_accounts = _prompt_max_accounts_subset(len(jobs_preview))
+        idx_set = prompt_row_indices_scope(
+            console, len(jobs_preview), title="Задачи my.telegram.org / Web"
+        )
+        jobs_override_mytg = [jobs_preview[j - 1] for j in sorted(idx_set)]
+    if jobs_preview:
+        console.print("[dim]Запуск:[/]  [cyan]1[/] в этой консоли  [cyan]2[/] в фоне")
+        if Prompt.ask("Режим", choices=["1", "2"], default="1") == "2":
+            payload = {
+                "version": 1,
+                "task": "mytg",
+                "payload": {
+                    "mode": mode,
+                    "from_session_files": from_sess,
+                    "jobs_override": [j.to_json() for j in (jobs_override_mytg or [])],
+                },
+            }
+            jid, _, logp = spawn_worker_job(
+                payload,
+                task_label="mytg",
+                summary=f"{mode} n={len(jobs_override_mytg or [])}",
+            )
+            console.print(
+                f"[green]Фон:[/] id [cyan]{jid}[/] · лог [cyan]{logp}[/] · "
+                f"[dim]реестр output/job_registry.jsonl[/]"
+            )
+            Prompt.ask("\n[dim]Enter — назад[/]", default="")
+            return
     try:
         run_mytg_menu_flow(
             console,
             settings=sett,
             mode=mode,  # type: ignore[arg-type]
             from_session_files=from_sess,
-            max_accounts=max_accounts,
+            jobs_override=jobs_override_mytg,
         )
     except KeyboardInterrupt:
         console.print("\n[yellow]Прервано.[/]")
@@ -665,15 +666,20 @@ def _run_broadcast_from_bundle_menu() -> None:
     stem_to_proxy_file: dict[str, Path] = {}
     unique_import_order: list[str] = []
 
+    zip_conflict = "skip"
     if Confirm.ask("Импортировать ZIP сессий (все accounts.zip, accounts2.zip…) в каталог сессий?", default=True):
-        mode = "overwrite" if Confirm.ask("Перезаписать совпадающие файлы на диске?", default=False) else "skip"
+        zip_conflict = (
+            "overwrite"
+            if Confirm.ask("Перезаписать совпадающие файлы на диске?", default=False)
+            else "skip"
+        )
         for sl in slices:
             if not sl.zip_path.is_file():
                 console.print(f"[dim]Нет {escape(sl.zip_path.name)} — пропуск.[/]")
                 stems_by_label[sl.label] = frozenset()
                 continue
             try:
-                rep = import_sessions_zip(sl.zip_path, on_conflict=mode, settings=sett)
+                rep = import_sessions_zip(sl.zip_path, on_conflict=zip_conflict, settings=sett)
                 console.print(f"[bold]{escape(sl.label)}[/] — {escape(sl.zip_path.name)}")
                 print_zip_import_report(console, rep)
                 stems_by_label[sl.label] = frozenset(rep.imported_stems)
@@ -790,50 +796,35 @@ def _run_broadcast_from_bundle_menu() -> None:
             console.print("[red]Нет аккаунтов в accounts.json после импорта.[/]")
             Prompt.ask("\n[dim]Enter — назад[/]", default="")
             return
-        accs_all = load_accounts()
-        console.print("[dim]Аккаунты как в accounts.json; подсказка — последняя рассылка / API (UTC):[/]")
-        for i, a in enumerate(accs_all, 1):
-            name = a.get("session_name", "?")
-            hint = _account_activity_hint(a)
-            extra = f" [dim]{escape(hint)}[/]" if hint else ""
-            console.print(f"  [cyan]{i}[/]  {escape(str(name))}{extra}")
-        cap = _prompt_max_accounts_subset(len(accs_all))
-        if cap is not None:
-            chosen = accs_all[:cap]
-            sns = frozenset(
-                (x.get("session_name") or "").strip()
-                for x in chosen
-                if (x.get("session_name") or "").strip()
-            )
-            if not sns:
-                console.print("[red]Не удалось выбрать session_name для подмножества.[/]")
-                Prompt.ask("\n[dim]Enter — назад[/]", default="")
-                return
-            broadcast_extra_kw["only_session_names"] = sns
-            console.print(
-                f"[dim]В этом прогоне:[/] [cyan]{len(sns)}[/] [dim]аккаунтов из[/] [cyan]{len(accs_all)}[/]"
-            )
+        tcat = build_telethon_catalog()
+        if not tcat:
+            console.print("[red]Нет аккаунтов с api_id+api_hash.[/]")
+            Prompt.ask("\n[dim]Enter — назад[/]", default="")
+            return
+        print_account_catalog_table(console, tcat)
+        _, scope = prompt_account_scope(console, tcat, title="Рассылка: аккаунты")
+        if not scope:
+            console.print("[red]Пустой набор аккаунтов.[/]")
+            Prompt.ask("\n[dim]Enter — назад[/]", default="")
+            return
+        broadcast_extra_kw["only_session_names"] = scope
+        console.print(f"[dim]В прогоне аккаунтов:[/] [cyan]{len(scope)}[/]")
     elif acc_mode == "2":
-        accs_pick = load_accounts()
-        if not accs_pick:
+        tcat = build_telethon_catalog()
+        if not tcat:
             console.print(
                 "[red]Нет аккаунтов в accounts.json.[/] Добавьте сессию: главное меню → [bold]9[/] → [bold]3[/]."
             )
             Prompt.ask("\n[dim]Enter — назад[/]", default="")
             return
-        for i, a in enumerate(accs_pick, 1):
-            name = a.get("session_name", "?")
-            hint = _account_activity_hint(a)
-            extra = f" [dim]{escape(hint)}[/]" if hint else ""
-            console.print(f"  [cyan]{i}[/]  {escape(str(name))}{extra}")
+        print_account_catalog_table(console, tcat)
         pick = _prompt_nonneg_int(
-            "Номер аккаунта для рассылки",
+            "id аккаунта из таблицы (один, без прокси в этом прогоне)",
             default=1,
             minimum=1,
-            maximum=len(accs_pick),
+            maximum=len(tcat),
         )
-        picked = accs_pick[pick - 1]
-        sn_one = (picked.get("session_name") or "").strip()
+        sn_one = tcat[pick - 1].session_name.strip()
         if not sn_one:
             console.print("[red]У записи нет session_name.[/]")
             Prompt.ask("\n[dim]Enter — назад[/]", default="")
@@ -860,8 +851,8 @@ def _run_broadcast_from_bundle_menu() -> None:
             f"[dim](hash скрыт). Дальше — телефон, код, опционально прокси.[/]"
         )
 
-    cat = Prompt.ask("Категория базы", choices=["hot", "warm", "all"], default="hot")
-    cat_val = None if cat == "all" else cat
+    cat_key = Prompt.ask("Категория базы", choices=["hot", "warm", "all"], default="hot")
+    cat_val = None if cat_key == "all" else cat_key
     limit = _prompt_nonneg_int(
         "Сколько пользователей из БД (макс. в выборке)",
         default=200,
@@ -889,6 +880,38 @@ def _run_broadcast_from_bundle_menu() -> None:
     )
     if not Confirm.ask("Начать рассылку?", default=False):
         return
+
+    if acc_mode in ("1", "2"):
+        console.print("[dim]Запуск:[/]  [cyan]1[/] в этой консоли  [cyan]2[/] в фоне")
+        if Prompt.ask("Режим", choices=["1", "2"], default="1") == "2":
+            only_list = list(broadcast_extra_kw.get("only_session_names") or [])
+            job_payload = {
+                "version": 1,
+                "task": "broadcast_bundle",
+                "payload": {
+                    "campaign_dir": str(root.resolve()),
+                    "limit": limit,
+                    "category": cat_key,
+                    "zip_conflict": zip_conflict,
+                    "broadcast_mode": broadcast_mode,
+                    "send_media": send_media,
+                    "exclude_invited": ex_inv,
+                    "only_session_names": only_list,
+                    "broadcast_delay_minutes": None,
+                    "broadcast_account_gap_minutes": None,
+                },
+            }
+            jid, _, logp = spawn_worker_job(
+                job_payload,
+                task_label="broadcast",
+                summary=f"{root.name} limit={limit}",
+            )
+            console.print(
+                f"[green]Фон:[/] id [cyan]{jid}[/] · лог [cyan]{logp}[/] · "
+                f"[dim]реестр output/job_registry.jsonl[/]"
+            )
+            Prompt.ask("\n[dim]Enter — назад[/]", default="")
+            return
 
     async def _go_async():
         db = get_db()
@@ -1046,6 +1069,106 @@ def _run_cleanup_accounts_menu() -> None:
     Prompt.ask("\n[dim]Enter — назад[/]", default="")
 
 
+def _run_bulk_prepare_menu() -> None:
+    """Подготовка аккаунтов: выбор аккаунтов + консоль или фон."""
+    cat = build_telethon_catalog()
+    if not cat:
+        console.print("[red]Нет аккаунтов с api_id+api_hash в accounts.json.[/]")
+        Prompt.ask("\n[dim]Enter — назад[/]", default="")
+        return
+    print_account_catalog_table(console, cat)
+    _, scope = prompt_account_scope(console, cat, title="Подготовка аккаунтов (2FA, прокси, сброс)")
+    if not scope:
+        console.print("[red]Пустой набор аккаунтов.[/]")
+        Prompt.ask("\n[dim]Enter — назад[/]", default="")
+        return
+    console.print("[dim]Запуск:[/]  [cyan]1[/] в этой консоли  [cyan]2[/] в фоне")
+    if Prompt.ask("Режим", choices=["1", "2"], default="1") == "2":
+        s = Settings()
+        pwd_plain = s.bulk_2fa_password
+        if not pwd_plain:
+            console.print(
+                "[yellow]Пароль возьмётся из ввода (в job-файле на диске); "
+                "после выполнения можно удалить output/job_payloads/*.json[/]"
+            )
+            pwd_plain = Prompt.ask("Пароль облачного 2FA", password=True)
+        if not pwd_plain:
+            console.print("[red]Без пароля фоновая задача не запускается.[/]")
+            Prompt.ask("\n[dim]Enter — назад[/]", default="")
+            return
+        payload = {
+            "version": 1,
+            "task": "bulk_prepare",
+            "payload": {
+                "only_session_names": sorted(scope),
+                "password_plain": pwd_plain,
+            },
+        }
+        jid, _, logp = spawn_worker_job(
+            payload,
+            task_label="bulk_prepare",
+            summary=f"n={len(scope)}",
+        )
+        console.print(
+            f"[green]Фон:[/] id [cyan]{jid}[/] · лог [cyan]{logp}[/]"
+        )
+        Prompt.ask("\n[dim]Enter — назад[/]", default="")
+        return
+    try:
+        asyncio.run(
+            run_bulk_account_prepare(console, only_session_names=scope)
+        )
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Прервано.[/]")
+    Prompt.ask("\n[dim]Enter — назад[/]", default="")
+
+
+def _run_accounts_catalog_menu() -> None:
+    """Таблица аккаунтов с id для выбора в других пунктах."""
+    console.print()
+    console.print("[bold white]── Сводка аккаунтов (Telethon) ──[/]")
+    cat = build_telethon_catalog()
+    if not cat:
+        console.print("[yellow]Нет аккаунтов с api_id+api_hash в accounts.json.[/]")
+    else:
+        print_account_catalog_table(console, cat)
+    console.print(
+        "[dim]Колонка[/] [cyan]id[/][dim]: те же номера, что в запросах «выбрать по id» "
+        "(например [cyan]1,3,5[/]). См. рассылку, mytg, вступления, сбор базы.[/]"
+    )
+    Prompt.ask("\n[dim]Enter — назад[/]", default="")
+
+
+def _run_background_jobs_menu() -> None:
+    """Последние фоновые задачи и пути к логам."""
+    console.print()
+    console.print("[bold white]── Фоновые задачи ──[/]")
+    rows = read_recent_registry_entries(limit=25)
+    if not rows:
+        console.print("[dim]Пока пусто. Реестр:[/] [cyan]output/job_registry.jsonl[/]")
+    else:
+        for r in rows:
+            jid = r.get("job_id", "?")
+            task = r.get("task", "?")
+            st = r.get("status", "?")
+            pid = r.get("pid") or 0
+            logp = r.get("log_path", "")
+            try:
+                p_int = int(pid)
+            except (TypeError, ValueError):
+                p_int = 0
+            alive = pid_alive(p_int) if p_int else False
+            extra = " · pid активен" if alive else ""
+            console.print(
+                f"  [cyan]{escape(str(jid))}[/]  {escape(str(task))}  "
+                f"[dim]{escape(str(st))}[/]{extra}"
+            )
+            if logp:
+                console.print(f"    [dim]лог:[/] {escape(str(logp))}")
+    console.print("[dim]Каталог логов:[/] [cyan]output/job_logs/[/]")
+    Prompt.ask("\n[dim]Enter — назад[/]", default="")
+
+
 def _run_system_hub_submenu() -> None:
     """Хаб: импорт, настройки, сессии, опционально API."""
     while True:
@@ -1058,11 +1181,13 @@ def _run_system_hub_submenu() -> None:
         console.print(f"{_mk('5')} Подготовка аккаунтов [dim](2FA, прокси, сброс сессий)[/]")
         console.print(f"{_mk('6')} Рассылка из пакета [dim](ZIP, прокси, тексты, опц. фото, БД)[/]")
         console.print(f"{_mk('7')} Очистка аккаунтов и прокси [dim](быстрый сброс)[/]")
+        console.print(f"{_mk('8')} Сводка аккаунтов [dim](таблица id / session / последнее использование)[/]")
+        console.print(f"{_mk('9')} Фоновые задачи [dim](логи, реестр)[/]")
         console.print(f"{_mk('0')} Назад в главное меню")
         console.print()
         sub = Prompt.ask(
             "Выбор",
-            choices=["0", "1", "2", "3", "4", "5", "6", "7"],
+            choices=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
             default="0",
         )
         if sub == "0":
@@ -1077,11 +1202,15 @@ def _run_system_hub_submenu() -> None:
             elif sub == "4":
                 _run_mytelegram_api_placeholder()
             elif sub == "5":
-                asyncio.run(run_bulk_account_prepare(console))
+                _run_bulk_prepare_menu()
             elif sub == "6":
                 _run_broadcast_from_bundle_menu()
             elif sub == "7":
                 _run_cleanup_accounts_menu()
+            elif sub == "8":
+                _run_accounts_catalog_menu()
+            elif sub == "9":
+                _run_background_jobs_menu()
         except KeyboardInterrupt:
             console.print("\n[yellow]Прервано.[/]")
         except Exception as e:
@@ -1236,8 +1365,16 @@ async def _run_scrape(
             "[dim]Отдельная сессия: группы по одной, один и тот же клиент Telethon.[/]"
         )
     else:
+        tcat_sc = build_telethon_catalog()
+        if not tcat_sc:
+            console.print("[red]Нет аккаунтов с api_id+api_hash для пула сбора.[/]")
+            return
+        print_account_catalog_table(console, tcat_sc)
+        _, scrape_scope = prompt_account_scope(console, tcat_sc, title="Сбор базы: пул аккаунтов")
+        if not scrape_scope:
+            return
         with console.status("[bold]Загрузка пула аккаунтов…[/]", spinner="dots"):
-            pool = AccountPool()
+            pool = AccountPool(only_session_names=scrape_scope)
             max_concurrent = max(1, len(pool.accounts))
             if (sett.scrape_session_name or "").strip():
                 max_concurrent = 1
@@ -1285,6 +1422,11 @@ async def _run_scrape(
     total_hot = sum(r[0] for r in results)
     total_warm = sum(r[1] for r in results)
     console.print(f"\n[bold green]Итого: {total_hot} горячих, {total_warm} тёплых[/]")
+    if pool is not None and total_hot + total_warm > 0:
+        try:
+            touch_accounts_last_use(pool.session_names_ordered(), kind="scrape")
+        except Exception:
+            pass
     Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
 
 
@@ -1304,24 +1446,20 @@ async def _run_scrape_single_account_branch() -> None:
     if ch == "0":
         return
     if ch == "1":
-        accs = load_accounts()
-        if not accs:
+        tcat = build_telethon_catalog()
+        if not tcat:
             console.print(
                 "[red]Нет аккаунтов в accounts.json.[/] Добавьте сессию: главное меню → [bold]9[/] → [bold]3[/]."
             )
             return
-        for i, a in enumerate(accs, 1):
-            name = a.get("session_name", "?")
-            console.print(f"  [cyan]{i}[/]  {escape(str(name))}")
+        print_account_catalog_table(console, tcat)
         pick = _prompt_nonneg_int(
-            "Номер аккаунта из списка",
+            "id аккаунта из таблицы",
             default=1,
             minimum=1,
-            maximum=len(accs),
+            maximum=len(tcat),
         )
-        idx = pick - 1
-        picked = accs[idx]
-        name = picked.get("session_name")
+        name = tcat[pick - 1].session_name
         if not name:
             console.print("[red]У записи нет session_name.[/]")
             return
@@ -1411,7 +1549,17 @@ async def _run_join_groups() -> None:
         console.print("[red]Нет валидных ссылок t.me в выбранном списке.[/]")
         return
 
-    mgr = InviteManager()
+    tcat = build_telethon_catalog()
+    if not tcat:
+        console.print("[red]Нет аккаунтов с api_id+api_hash.[/]")
+        return
+    print_account_catalog_table(console, tcat)
+    _, join_scope = prompt_account_scope(console, tcat, title="Вступление в группы")
+    if not join_scope:
+        console.print("[red]Пустой набор аккаунтов.[/]")
+        return
+
+    mgr = InviteManager(only_session_names=join_scope)
     sett = mgr.settings
     session_names = mgr.pool.session_names_ordered()
     if not session_names:
@@ -1560,6 +1708,7 @@ async def _add_contacts_workflow(
     fixed_client: TelegramClient | None = None,
     session_client_settings: Settings | None = None,
     prefer_pool_for_read: bool = False,
+    invite_pool_scope: frozenset[str] | None = None,
 ) -> None:
     """Общая логика: категория, список из БД, цикл AddContact."""
     db = get_db()
@@ -1608,7 +1757,10 @@ async def _add_contacts_workflow(
         maximum=len(users),
     )
     users = users[:count]
-    mgr = InviteManager()
+    only_names = invite_pool_scope
+    if only_names is None and fixed_session:
+        only_names = frozenset([fixed_session])
+    mgr = InviteManager(only_session_names=only_names)
     for u in users:
         uname = u.get("username") or (f"@{u.get('telegram_id')}" if u.get("telegram_id") else None)
         if not uname:
@@ -1651,23 +1803,20 @@ async def _run_add_contacts_one_account_sub() -> None:
     if ch == "0":
         return
     if ch == "1":
-        accs = load_accounts()
-        if not accs:
+        tcat = build_telethon_catalog()
+        if not tcat:
             console.print(
                 "[red]Нет аккаунтов в accounts.json.[/] Добавьте сессию: главное меню → [bold]9[/] → [bold]3[/]."
             )
             return
-        for i, a in enumerate(accs, 1):
-            name = a.get("session_name", "?")
-            console.print(f"  [cyan]{i}[/]  {escape(str(name))}")
+        print_account_catalog_table(console, tcat)
         pick = _prompt_nonneg_int(
-            "Номер аккаунта из списка",
+            "id аккаунта из таблицы",
             default=1,
             minimum=1,
-            maximum=len(accs),
+            maximum=len(tcat),
         )
-        picked = accs[pick - 1]
-        name = picked.get("session_name")
+        name = tcat[pick - 1].session_name
         if not name:
             console.print("[red]У записи нет session_name.[/]")
             return
@@ -1725,7 +1874,14 @@ async def _run_add_contacts() -> None:
     if mode == "1":
         await _run_add_contacts_one_account_sub()
     else:
-        await _add_contacts_workflow(pool=True)
+        tcat = build_telethon_catalog()
+        if not tcat:
+            console.print("[red]Нет аккаунтов с api_id+api_hash.[/]")
+        else:
+            print_account_catalog_table(console, tcat)
+            _, cscope = prompt_account_scope(console, tcat, title="Пул для добавления в контакты")
+            if cscope:
+                await _add_contacts_workflow(pool=True, invite_pool_scope=cscope)
     Prompt.ask("\n[dim]Нажмите Enter для возврата в меню[/]", default="")
 
 
@@ -1742,7 +1898,16 @@ async def _run_invite() -> None:
         minimum=1,
         maximum=10_000,
     )
-    mgr = InviteManager()
+    tcat = build_telethon_catalog()
+    if not tcat:
+        console.print("[red]Нет аккаунтов с api_id+api_hash.[/]")
+        return
+    print_account_catalog_table(console, tcat)
+    _, inv_scope = prompt_account_scope(console, tcat, title="Приглашение в канал: аккаунты")
+    if not inv_scope:
+        console.print("[red]Пустой набор аккаунтов.[/]")
+        return
+    mgr = InviteManager(only_session_names=inv_scope)
     sett = mgr.settings
     session_names = mgr.pool.session_names_ordered()
     if not session_names:
@@ -1849,24 +2014,40 @@ async def _run_check_proxies() -> None:
 
 def _run_assign_proxies() -> None:
     """Назначить прокси из пула аккаунтам (перестроить под TG-аккаунты)."""
-    bundle_rows = bundle_round_robin_account_rows(load_accounts_all())
     proxies = load_proxy_pool_from_config()
-    if not bundle_rows:
-        console.print("[red]Нет строк с session_name в config/accounts.json[/]")
-        return
     if not proxies:
         console.print("[red]Нет прокси. Добавьте в config/proxies.txt или settings.json[/]")
         return
+    tcat = build_telethon_catalog()
+    if not tcat:
+        console.print("[red]Нет аккаунтов с api_id+api_hash в accounts.json[/]")
+        return
+    print_account_catalog_table(console, tcat)
+    _, pscope = prompt_account_scope(console, tcat, title="Назначение прокси (round-robin)")
+    if not pscope:
+        console.print("[red]Пустой набор.[/]")
+        return
+    bundle_rows = bundle_round_robin_account_rows(load_accounts_all())
+    n_match = sum(
+        1
+        for r in bundle_rows
+        if (r.get("session_name") or "").strip() in pscope
+    )
     console.print(
-        f"[dim]В пуле прокси: {len(proxies)} шт. Строк в accounts.json с session_name: {len(bundle_rows)} шт. "
-        f"(round-robin по порядку в JSON; .session без записи в JSON сюда не входят.)[/]"
+        f"[dim]В пуле прокси: {len(proxies)} шт. Аккаунтов в выборе (с session в JSON): {n_match}.[/]"
     )
     if not Confirm.ask(
-        "Назначить каждому аккаунту один прокси по round-robin (1-й акк → 1-й прокси, 2-й → 2-й, …)?"
+        "Назначить каждому выбранному аккаунту прокси по round-robin?"
     ):
         return
-    ok, msg = assign_proxies_round_robin_to_accounts()
+    ok, msg = assign_proxies_round_robin_to_accounts(
+        Settings(), only_session_names=pscope
+    )
     if ok:
+        try:
+            touch_accounts_last_use(list(pscope), kind="proxy_assign")
+        except Exception:
+            pass
         console.print(
             f"[green]Прокси назначены:[/] у каждого аккаунта в [bold]accounts.json[/] обновлено поле [bold]proxy[/] "
             f"(round-robin из пула). Файл: [cyan]{msg}[/]"

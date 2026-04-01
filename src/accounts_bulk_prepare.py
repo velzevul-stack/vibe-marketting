@@ -22,6 +22,7 @@ from src.config import (
     load_proxy_pool_from_config,
     proxy_url_to_telethon,
     telethon_session_file,
+    touch_accounts_last_use,
 )
 from src.telethon_client_factory import telegram_client
 
@@ -37,7 +38,12 @@ def _client_for(acc: dict, proxy: str | None, settings: Settings) -> TelegramCli
     )
 
 
-async def run_bulk_account_prepare(console) -> None:
+async def run_bulk_account_prepare(
+    console,
+    *,
+    only_session_names: frozenset[str] | None = None,
+    password_plain: str | None = None,
+) -> None:
     """
     1) Включить облачный пароль 2FA (без email), если ещё не включён.
     2) Назначить прокси из пула (как меню 9 → 2 → 2).
@@ -45,11 +51,17 @@ async def run_bulk_account_prepare(console) -> None:
     """
     settings = Settings()
     accounts = load_accounts()
+    if only_session_names:
+        accounts = [
+            a
+            for a in accounts
+            if (a.get("session_name") or "").strip() in only_session_names
+        ]
     if not accounts:
         console.print("[red]Нет аккаунтов в config/accounts.json[/]")
         return
 
-    pwd = settings.bulk_2fa_password
+    pwd = password_plain if password_plain is not None else settings.bulk_2fa_password
     if not pwd:
         console.print(
             "[dim]Пароль 2FA не задан в settings.json (ключ bulk_2fa_password). "
@@ -106,7 +118,9 @@ async def run_bulk_account_prepare(console) -> None:
 
     # --- Шаг 2: прокси ---
     console.print("\n[bold cyan]Шаг 2/3: назначение прокси[/]")
-    ok, msg = assign_proxies_round_robin_to_accounts()
+    ok, msg = assign_proxies_round_robin_to_accounts(
+        settings, only_session_names=only_session_names
+    )
     if ok:
         console.print(f"  [green]{msg}[/]")
     else:
@@ -115,9 +129,16 @@ async def run_bulk_account_prepare(console) -> None:
             return
 
     accounts = load_accounts()
+    if only_session_names:
+        accounts = [
+            a
+            for a in accounts
+            if (a.get("session_name") or "").strip() in only_session_names
+        ]
 
     # --- Шаг 3: сброс чужих сессий с прокси ---
     console.print("\n[bold cyan]Шаг 3/3: сброс других сессий (через прокси аккаунта)[/]")
+    touched: list[str] = []
     for acc in accounts:
         name = acc.get("session_name", "?")
         path = telethon_session_file(name, settings)
@@ -140,6 +161,7 @@ async def run_bulk_account_prepare(console) -> None:
                 continue
             await client(ResetAuthorizationsRequest())
             console.print(f"  [green]{name}: другие сессии сброшены (осталась эта)[/]")
+            touched.append(name)
         except Exception as e:
             console.print(f"  [red]{name}: сброс сессий — {e}[/]")
         finally:
@@ -148,5 +170,11 @@ async def run_bulk_account_prepare(console) -> None:
             except Exception:
                 pass
         await asyncio.sleep(delay + random.uniform(0, 2))
+
+    if touched:
+        try:
+            touch_accounts_last_use(touched, kind="bulk_prepare")
+        except Exception:
+            pass
 
     console.print("\n[bold green]Готово. Дальше используйте меню как обычно (прокси уже в accounts.json).[/]")

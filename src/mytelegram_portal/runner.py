@@ -237,7 +237,8 @@ def run_mytg_menu_flow(
 
     prev = load_portal_state(spath)
     state = _merge_state_with_jobs(prev, jobs)
-    if max_accounts is not None:
+    trim_state = jobs_override is not None or max_accounts is not None
+    if trim_state:
         allowed = {j.session_name for j in jobs}
         state.accounts = [a for a in state.accounts if a.session_name in allowed]
     save_portal_state(spath, state)

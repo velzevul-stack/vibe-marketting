@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Vibe Marketing CLI — Telegram Lead Scraper для вейп-продавцов."""
+from __future__ import annotations
+
 import argparse
 import sys
 from pathlib import Path
@@ -113,6 +115,8 @@ def _cli_broadcast(
     send_media: bool = True,
     broadcast_delay_spec: str | None = None,
     broadcast_account_gap_spec: str | None = None,
+    only_session_names: frozenset[str] | None = None,
+    exclude_invited: bool = True,
 ) -> int:
     """Рассылка из каталога-пакета без меню (ZIP, apis.txt, proxy.txt, sessions_bind и т.д.)."""
     import asyncio
@@ -136,6 +140,7 @@ def _cli_broadcast(
         assign_proxies_round_robin_to_accounts,
         load_api_pairs_from_file,
         load_proxy_pool_from_file,
+        touch_accounts_last_use,
     )
     from src.db import get_db
 
@@ -283,16 +288,22 @@ def _cli_broadcast(
             console=con,
             category=cat_val,
             total_limit=limit,
-            exclude_invited=True,
+            exclude_invited=exclude_invited,
             broadcast_mode=mode,
             send_media=send_media,
             account_gap_seconds=account_gap_seconds,
             account_gap_max_seconds=account_gap_max_seconds,
             session_interval_seconds=session_interval_seconds,
             session_interval_max_seconds=session_interval_max_seconds,
+            only_session_names=only_session_names,
         )
 
     totals = asyncio.run(_run())
+    if totals.by_session:
+        try:
+            touch_accounts_last_use(list(totals.by_session.keys()), kind="broadcast")
+        except Exception:
+            pass
     suf = (
         f" username_not_found_marked={totals.username_not_found_marked}"
         if totals.username_not_found_marked
@@ -640,6 +651,23 @@ def main() -> None:
         help="Между попытками внутри API-группы: минуты или MIN-MAX; 0=выкл; иначе settings",
     )
     parser.add_argument(
+        "--broadcast-accounts",
+        default=None,
+        metavar="NAMES",
+        help="Ограничить рассылку: session_name через запятую (подмножество accounts.json)",
+    )
+    parser.add_argument(
+        "--broadcast-include-invited",
+        action="store_true",
+        help="Не исключать из выборки БД строки с invited_to_channel_at",
+    )
+    parser.add_argument(
+        "--worker-job",
+        metavar="PATH",
+        default=None,
+        help="Внутренний: выполнить задачу из JSON (фоновый воркер)",
+    )
+    parser.add_argument(
         "--csv-broadcast",
         metavar="DIR",
         help="Рассылка по CSV из пакета (ZIP, proxies, тексты; apis_sessions.txt + apis.txt)",
@@ -736,6 +764,22 @@ def main() -> None:
         help="Список из *.session: телефон = 8–15 цифр в имени файла (+ добавляется), прокси RR из config/proxies.txt",
     )
     args = parser.parse_args()
+    if args.worker_job:
+        from src.jobs.registry import register_job_end
+        from src.jobs.worker import run_worker_job_file
+
+        wp = Path(args.worker_job).expanduser()
+        jid = wp.stem
+        code = 1
+        try:
+            code = run_worker_job_file(wp)
+        finally:
+            register_job_end(
+                job_id=jid,
+                status="ok" if code == 0 else "error",
+                exit_code=code,
+            )
+        raise SystemExit(code)
     if args.proxy is not None:
         raise SystemExit(_cli_proxy_state(args.proxy))
     if args.assign_proxies:
@@ -752,6 +796,11 @@ def main() -> None:
         con.print(f"[green]telethon_default_api очищен:[/] [dim]{msg}[/]" if ok else f"[red]{msg}[/]")
         raise SystemExit(0 if ok else 1)
     if args.broadcast:
+        _only_b = None
+        if args.broadcast_accounts:
+            _only_b = frozenset(
+                x.strip() for x in args.broadcast_accounts.split(",") if x.strip()
+            )
         raise SystemExit(
             _cli_broadcast(
                 args.broadcast,
@@ -762,6 +811,8 @@ def main() -> None:
                 send_media=not args.broadcast_text_only,
                 broadcast_delay_spec=args.broadcast_delay_minutes,
                 broadcast_account_gap_spec=args.broadcast_account_gap_minutes,
+                only_session_names=_only_b,
+                exclude_invited=not args.broadcast_include_invited,
             )
         )
     if args.csv_broadcast or args.csv_recipients or args.csv_skip_sent:
