@@ -58,6 +58,8 @@
   },
 
   "_mytg_comment": "Playwright: Telegram Web + my.telegram.org (меню 9→4). mytg_headless=false снижает детект; на Linux сервере часто xvfb-run.",
+  "_mytg_diverse_contexts_comment": "true — для каждой сессии свой стабильный набор UA/locale/timezone/viewport/Headers (меньше корреляции между аккаунтами); false — как раньше (2 UA, 1280×800)",
+  "mytg_diverse_contexts": true,
   "mytg_headless": false,
   "mytg_chromium_channel": null,
   "mytg_portal_code_timeout_sec": 120,

@@ -24,6 +24,7 @@ from src.config import (
     upsert_telethon_account,
     write_api_to_session_sidecar,
 )
+from src.mytelegram_portal.browser_profiles import playwright_context_options_for_mytg
 from src.mytelegram_portal.portal_flow import run_mytelegram_portal
 from src.mytelegram_portal.pw_util import launch_browser, playwright_proxy_from_url
 from src.mytelegram_portal.state import (
@@ -260,10 +261,9 @@ def run_mytg_menu_flow(
                     if job.status != "pending":
                         continue
                     proxy = playwright_proxy_from_url(job.proxy_url)
-                    ctx_kwargs: dict = {
-                        "viewport": {"width": 1280, "height": 800},
-                        "user_agent": user_agents[hash(job.session_name) % len(user_agents)],
-                    }
+                    ctx_kwargs: dict = playwright_context_options_for_mytg(
+                        job.session_name, sett
+                    )
                     if proxy:
                         ctx_kwargs["proxy"] = proxy
                     context = browser.new_context(**ctx_kwargs)
@@ -326,8 +326,7 @@ def run_mytg_menu_flow(
                     proxy = playwright_proxy_from_url(job.proxy_url)
                     ctx_kwargs: dict = {
                         "storage_state": job.web_storage_path,
-                        "viewport": {"width": 1280, "height": 800},
-                        "user_agent": user_agents[hash(job.session_name) % len(user_agents)],
+                        **playwright_context_options_for_mytg(job.session_name, sett),
                     }
                     if proxy:
                         ctx_kwargs["proxy"] = proxy

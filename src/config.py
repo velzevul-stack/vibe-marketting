@@ -297,6 +297,9 @@ class Settings:
             )
         except (TypeError, ValueError):
             self.mytg_wait_after_web_sec = 86400.0
+        self.mytg_diverse_contexts: bool = bool(
+            self._data.get("mytg_diverse_contexts", True)
+        )
 
 
 def clone_settings(**overrides) -> Settings:
