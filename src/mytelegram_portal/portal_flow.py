@@ -27,7 +27,7 @@ _FALLBACK_APP_URLS = (
     "https://en.wikipedia.org/wiki/Barograph",
 )
 
-_PLATFORM_VALUES = ("android", "web", "desktop", "ios", "ubuntu", "other")
+_PLATFORM_VALUES = ("android", "desktop", "web", "ios", "other", "wp", "bb", "ubp")
 
 
 def _random_app_names() -> tuple[str, str]:
@@ -94,7 +94,6 @@ def _poll_portal_code(
 
 
 def _fill_my_phone(portal_page, phone: str, settings: Settings, log: LogFn) -> None:
-    # Разметка my.telegram.org: form#my_send_form, label[for=my_login_phone], input#my_login_phone
     try:
         loc = portal_page.get_by_label(
             re.compile(
@@ -105,6 +104,7 @@ def _fill_my_phone(portal_page, phone: str, settings: Settings, log: LogFn) -> N
         if loc.is_visible(timeout=4000):
             loc.fill(phone, timeout=15000)
             D.delay_after_type(settings, log)
+            log("phone filled (label)")
             return
     except Exception:
         pass
@@ -115,6 +115,7 @@ def _fill_my_phone(portal_page, phone: str, settings: Settings, log: LogFn) -> N
         if loc.is_visible(timeout=3000):
             loc.fill(phone, timeout=15000)
             D.delay_after_type(settings, log)
+            log("phone filled (placeholder)")
             return
     except Exception:
         pass
@@ -132,10 +133,37 @@ def _fill_my_phone(portal_page, phone: str, settings: Settings, log: LogFn) -> N
             if loc.is_visible(timeout=5000):
                 loc.fill(phone, timeout=15000)
                 D.delay_after_type(settings, log)
+                log(f"phone filled ({sel})")
                 return
         except Exception:
             continue
     raise RuntimeError("Поле телефона на my.telegram.org не найдено")
+
+
+def _wait_portal_phone_accepted(
+    portal_page, log: LogFn, timeout_sec: float = 30,
+) -> None:
+    """After clicking submit, wait for AJAX: code form visible or error alert."""
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        try:
+            alert = portal_page.locator("#my_login_alert .alert-danger")
+            if alert.count() > 0 and alert.first.is_visible(timeout=300):
+                err_text = alert.first.inner_text(timeout=3000).strip()
+                if err_text:
+                    raise RuntimeError(f"my.telegram.org отклонил номер: {err_text}")
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
+        try:
+            if portal_page.locator("#my_password").is_visible(timeout=500):
+                log("phone accepted — code form visible")
+                return
+        except Exception:
+            pass
+        time.sleep(0.5)
+    log("warning: timeout waiting for code form after phone submit")
 
 
 def _portal_submit_phone(portal_page, settings: Settings, log: LogFn) -> None:
@@ -143,21 +171,27 @@ def _portal_submit_phone(portal_page, settings: Settings, log: LogFn) -> None:
         try:
             btn = portal_page.get_by_role("button", name=re.compile(pat, re.I))
             if btn.count() > 0 and btn.first.is_visible(timeout=3000):
+                log(f"submit phone: clicking '{pat}'")
                 btn.first.click(timeout=15000)
                 D.delay_after_submit(settings, log)
+                _wait_portal_phone_accepted(portal_page, log)
                 return
         except Exception:
             continue
+    log("submit phone: role buttons not found, trying CSS selectors")
     try:
         portal_page.locator("form#my_send_form button[type='submit']").first.click(
             timeout=15000
         )
         D.delay_after_submit(settings, log)
+        _wait_portal_phone_accepted(portal_page, log)
+        return
     except Exception:
         pass
     try:
         portal_page.locator("#my_send_form .btn-primary").first.click(timeout=15000)
         D.delay_after_submit(settings, log)
+        _wait_portal_phone_accepted(portal_page, log)
     except Exception as e:
         raise RuntimeError(f"Не удалось отправить телефон на my.telegram.org: {e}") from e
 
@@ -204,11 +238,13 @@ def _portal_sign_in(portal_page, settings: Settings, log: LogFn) -> None:
         try:
             btn = portal_page.get_by_role("button", name=re.compile(pat, re.I))
             if btn.count() > 0 and btn.first.is_visible(timeout=3000):
+                log(f"sign in: clicking '{pat}'")
                 btn.first.click(timeout=20000)
                 D.delay_after_submit(settings, log)
                 return
         except Exception:
             continue
+    log("sign in: role buttons not found, trying CSS selector")
     try:
         portal_page.locator("form#my_login_form button[type='submit']").first.click(
             timeout=20000
@@ -352,10 +388,13 @@ def run_mytelegram_portal(
     log("tg: open Telegram Web for code")
     tg.goto(TELEGRAM_WEB_K, wait_until="domcontentloaded", timeout=120000)
     D.delay_after_navigate(settings, log)
+    log("waiting for Telegram Web render")
     time.sleep(2.0)
     _open_telegram_service_chat(tg, settings, log)
+    log("waiting for chat to load")
     time.sleep(1.5)
 
+    log("polling for portal confirmation code")
     code = _poll_portal_code(tg, settings, log)
     if not code:
         log("auto code failed — manual input")
@@ -363,12 +402,15 @@ def run_mytelegram_portal(
     if not code:
         raise RuntimeError("Код my.telegram.org не получен")
 
+    log("switching to portal tab for code entry")
     portal.bring_to_front()
     _fill_portal_confirmation_code(portal, code, settings, log)
     _portal_sign_in(portal, settings, log)
+    log("waiting after sign in")
     time.sleep(2.0)
 
     _goto_api_tools(portal, settings, log)
+    log("waiting for API tools page")
     time.sleep(2.0)
 
     api_id, api_hash = _parse_api_from_page_text(portal)
