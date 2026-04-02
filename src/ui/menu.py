@@ -63,6 +63,7 @@ from src.broadcast.bundle import (
     validate_extra_import_slices,
 )
 from src.broadcast.campaign_assign import apply_package_api_proxy_assignments
+from src.broadcast.csv_cli import run_csv_broadcast_cli
 from src.broadcast.runner import run_dm_broadcast
 from src.groups_txt_io import export_groups_to_txt, import_txt_to_found_groups, load_found_groups_list
 from src.db import get_db
@@ -389,7 +390,7 @@ def _render_main_menu() -> str:
     console.print()
     console.print("[bold white]── Система и сервис ──[/]")
     console.print(
-        f"{_mk('9')} Импорты, настройки и аккаунты [dim](ZIP, рассылка, очистка, сессии, API)[/]"
+        f"{_mk('9')} Импорты, настройки и аккаунты [dim](ZIP, рассылка БД/CSV, очистка, сессии, API)[/]"
     )
     console.print(
         f"{_mk('a')} Очистить список найденных групп [dim](found_groups.json, не БД)[/]"
@@ -1013,6 +1014,117 @@ def _run_broadcast_from_bundle_menu() -> None:
     Prompt.ask("\n[dim]Enter — назад[/]", default="")
 
 
+def _run_csv_broadcast_interactive_menu() -> None:
+    """Рассылка по CSV из пакета — те же параметры, что у --csv-broadcast / --csv-recipients."""
+    console.print()
+    console.print("[bold white]── Рассылка по CSV из пакета ──[/]")
+    console.print(
+        "[dim]Как в CLI:[/] [cyan]--csv-broadcast[/] [dim]+[/] [cyan]--csv-recipients[/][dim];[/] "
+        "в каталоге — ZIP, apis, proxy, [cyan]text_1/2.txt[/]; при медиа — [cyan]1.jpg–3.jpg[/]. "
+        "В CSV нужны колонки [bold]User ID[/] и [bold]Username[/]."
+    )
+    sett = Settings()
+    default_dir = _PROJECT_ROOT / sett.campaign_dir
+    raw_dir = strip_c0_controls(
+        Prompt.ask("Каталог пакета (campaign)", default=str(default_dir)).strip()
+    )
+    csv_raw = strip_c0_controls(Prompt.ask("Путь к CSV получателей").strip())
+    if not csv_raw:
+        console.print("[red]Нужен путь к CSV.[/]")
+        Prompt.ask("\n[dim]Enter — назад[/]", default="")
+        return
+
+    delay_spec = strip_c0_controls(
+        Prompt.ask(
+            "Пауза сессии между ЛС, минуты [dim](число или MIN-MAX, напр. 20-30)[/]",
+            default="20-30",
+        ).strip()
+    ) or "30"
+
+    gap_raw = strip_c0_controls(
+        Prompt.ask(
+            "Зазор между аккаунтами одной API-группы, мин [dim](MIN-MAX или число; Enter — из settings)[/]",
+            default="",
+        ).strip()
+    )
+    gap_spec = gap_raw if gap_raw else None
+
+    send_media = Confirm.ask("Прикладывать изображения 1.jpg–3.jpg?", default=True)
+
+    zip_conflict = (
+        "overwrite"
+        if Confirm.ask(
+            "При импорте ZIP перезаписывать совпадающие файлы сессий на диске?",
+            default=False,
+        )
+        else "skip"
+    )
+
+    limit_raw = strip_c0_controls(
+        Prompt.ask("Макс. строк из CSV [dim](Enter — без лимита)[/]", default="").strip()
+    )
+    csv_limit: int | None = int(limit_raw) if limit_raw.isdigit() else None
+
+    log_raw = strip_c0_controls(
+        Prompt.ask(
+            "JSONL лог успешных отправок [dim](Enter — output/csv_broadcast_sent.jsonl)[/]",
+            default="",
+        ).strip()
+    )
+    sent_log = log_raw if log_raw else None
+
+    skip_sent = Confirm.ask(
+        "Пропускать user_id, уже записанные в этом JSONL?", default=False
+    )
+
+    console.print()
+    console.print("[dim]Сводка:[/]")
+    console.print(f"  пакет: [cyan]{escape(raw_dir)}[/]")
+    console.print(f"  CSV:   [cyan]{escape(csv_raw)}[/]")
+    console.print(f"  пауза сессии: [cyan]{escape(delay_spec)}[/] мин")
+    console.print(
+        "  зазор API-группы: "
+        f"[cyan]{escape(gap_raw) if gap_raw else 'из settings.json'}[/]"
+    )
+    console.print(f"  медиа: [cyan]{'да' if send_media else 'нет (только текст)'}[/]")
+    console.print(f"  ZIP при конфликте: [cyan]{escape(zip_conflict)}[/]")
+    if csv_limit is not None:
+        console.print(f"  лимит CSV: [cyan]{csv_limit}[/]")
+    if sent_log:
+        console.print(f"  лог: [cyan]{escape(sent_log)}[/]")
+    if skip_sent:
+        console.print("  пропуск по логу: [cyan]да[/]")
+
+    if not Confirm.ask("Запустить?", default=False):
+        Prompt.ask("\n[dim]Enter — назад[/]", default="")
+        return
+
+    try:
+        code = run_csv_broadcast_cli(
+            raw_dir,
+            csv_raw,
+            delay_spec,
+            zip_conflict,
+            csv_limit=csv_limit,
+            send_media=send_media,
+            sent_log=sent_log,
+            skip_sent=skip_sent,
+            csv_account_gap_spec=gap_spec,
+        )
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Прервано.[/]")
+        Prompt.ask("\n[dim]Enter — назад[/]", default="")
+        return
+    except Exception as e:
+        console.print(f"[red]{escape(str(e))}[/]")
+        Prompt.ask("\n[dim]Enter — назад[/]", default="")
+        return
+
+    if code != 0:
+        console.print(f"[red]Код выхода:[/] [white]{code}[/]")
+    Prompt.ask("\n[dim]Enter — назад[/]", default="")
+
+
 def _run_cleanup_accounts_menu() -> None:
     """Очистка accounts.json, сессий на диске, пула прокси."""
     console.print()
@@ -1180,14 +1292,17 @@ def _run_system_hub_submenu() -> None:
         console.print(f"{_mk('4')} API my.telegram.org [dim](опционально)[/]")
         console.print(f"{_mk('5')} Подготовка аккаунтов [dim](2FA, прокси, сброс сессий)[/]")
         console.print(f"{_mk('6')} Рассылка из пакета [dim](ZIP, прокси, тексты, опц. фото, БД)[/]")
-        console.print(f"{_mk('7')} Очистка аккаунтов и прокси [dim](быстрый сброс)[/]")
-        console.print(f"{_mk('8')} Сводка аккаунтов [dim](таблица id / session / последнее использование)[/]")
-        console.print(f"{_mk('9')} Фоновые задачи [dim](логи, реестр)[/]")
+        console.print(
+            f"{_mk('7')} Рассылка по CSV [dim](пакет + recipients.csv, паузы как --csv-broadcast)[/]"
+        )
+        console.print(f"{_mk('8')} Очистка аккаунтов и прокси [dim](быстрый сброс)[/]")
+        console.print(f"{_mk('9')} Сводка аккаунтов [dim](таблица id / session / последнее использование)[/]")
+        console.print(f"{_mk('10')} Фоновые задачи [dim](логи, реестр)[/]")
         console.print(f"{_mk('0')} Назад в главное меню")
         console.print()
         sub = Prompt.ask(
             "Выбор",
-            choices=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
+            choices=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"],
             default="0",
         )
         if sub == "0":
@@ -1206,10 +1321,12 @@ def _run_system_hub_submenu() -> None:
             elif sub == "6":
                 _run_broadcast_from_bundle_menu()
             elif sub == "7":
-                _run_cleanup_accounts_menu()
+                _run_csv_broadcast_interactive_menu()
             elif sub == "8":
-                _run_accounts_catalog_menu()
+                _run_cleanup_accounts_menu()
             elif sub == "9":
+                _run_accounts_catalog_menu()
+            elif sub == "10":
                 _run_background_jobs_menu()
         except KeyboardInterrupt:
             console.print("\n[yellow]Прервано.[/]")
