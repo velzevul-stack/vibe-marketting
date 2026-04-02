@@ -15,7 +15,30 @@
 3. **Имена файлов** — **8–15 цифр** номера в международном формате; допускается ведущий **`+`** (пример: **`+123456789012.session`** — так и оставляйте). Без плюса тоже можно: **`375291234567.session`**. Суффикс после **`_`** (коллизия) отбрасывается: **`+375…_a1b2.session`** → номер **`+375…`**.
 4. Зависимости: `pip install -r requirements.txt`, затем **`playwright install chromium`**.
 
+### Linux: `libatk-1.0.so.0` / другие `.so` не найдены
+
+На «голом» сервере или в Docker одного `playwright install chromium` мало — нужны **системные** библиотеки для Chromium. Иначе в логе будет что-то вроде: `error while loading shared libraries: libatk-1.0.so.0`.
+
+**Ubuntu / Debian (предпочтительно):**
+
+```bash
+sudo playwright install-deps
+# если `playwright` не в PATH:
+python -m playwright install-deps
+```
+
+**Минимально** (часто хватает для первой ошибки ATK):
+
+```bash
+sudo apt-get update
+sudo apt-get install -y libatk1.0-0 libatk-bridge2.0-0
+```
+
+Дальше снова `playwright install chromium` и запуск с `xvfb-run` (см. ниже). На RHEL/AlmaLinux смотрите вывод `playwright install-deps` или [документацию Playwright](https://playwright.dev/docs/intro#system-requirements).
+
 ## Сервер без монитора (Linux)
+
+Если **`"mytg_headless": false`**, но переменных **`DISPLAY` / `WAYLAND_DISPLAY`** нет, запуск **автоматически идёт в headless** (иначе Chromium падает с «Missing X server»). Чтобы оставить не-headless, используйте **`xvfb-run`** ниже.
 
 В `config/settings.json`: **`"mytg_headless": false`**, запуск:
 

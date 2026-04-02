@@ -248,7 +248,7 @@ def run_mytg_menu_flow(
         nonlocal state
         store = storage_dir(root)
         with sync_playwright() as p:
-            browser = launch_browser(p, sett)
+            browser = launch_browser(p, sett, console=console)
             try:
                 for job in state.accounts:
                     if job.status != "pending":
@@ -298,7 +298,7 @@ def run_mytg_menu_flow(
     def run_phase2() -> None:
         nonlocal state
         with sync_playwright() as p:
-            browser = launch_browser(p, sett)
+            browser = launch_browser(p, sett, console=console)
             try:
                 for job in state.accounts:
                     if job.status != "web_ok":

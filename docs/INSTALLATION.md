@@ -92,6 +92,19 @@ vibe-marketing-cli/
 └── data/                   # Данные (города и т.д.)
 ```
 
+## Playwright (my.telegram.org / меню 9 → 4)
+
+После `pip install -r requirements.txt` и **`playwright install chromium`** на **Linux-сервере** может понадобиться установка **системных** зависимостей браузера. Если Chromium падает с `libatk-1.0.so.0: cannot open shared object file` (или другими `*.so`):
+
+```bash
+sudo playwright install-deps
+# или: python -m playwright install-deps
+```
+
+На Ubuntu при необходимости вручную: `sudo apt-get install -y libatk1.0-0 libatk-bridge2.0-0`.
+
+Если задано `mytg_headless: false`, но на Linux **нет** `DISPLAY` / `WAYLAND_DISPLAY`, запуск **автоматически идёт в headless** (иначе Chromium падает с «Missing X server»). Чтобы оставить не-headless на сервере без монитора, оберните процесс в `xvfb-run -a …` — см. `bundles/mytelegram_api/CHAT_INSTRUCTION_RU.md`.
+
 ## Дополнительно
 
 - **Прокси и аккаунты:** [docs/PROXY_AND_ACCOUNTS.md](PROXY_AND_ACCOUNTS.md)
