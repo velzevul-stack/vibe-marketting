@@ -45,7 +45,57 @@ def _random_app_url() -> str:
     return secrets.choice(_FALLBACK_APP_URLS)
 
 
+def _click_to_reveal_spoilers(tg_page, log: LogFn) -> None:
+    """Click on spoiler-wrapped elements so hidden codes become readable."""
+    # Path 1: Firefox / older builds — <span class="spoiler">
+    try:
+        spoilers = tg_page.locator("span.spoiler")
+        cnt = spoilers.count()
+        if cnt > 0:
+            log(f"found {cnt} .spoiler span(s), clicking to reveal")
+            for i in range(cnt):
+                try:
+                    spoilers.nth(i).click(timeout=2000, force=True)
+                except Exception:
+                    pass
+            time.sleep(0.6)
+            return
+    except Exception:
+        pass
+
+    # Path 2: Chromium — DotRenderer canvas overlay with braille text.
+    # Dispatch click events on recent message bubbles that contain braille.
+    try:
+        revealed = tg_page.evaluate("""() => {
+            const brailleRe = /[\\u2800-\\u28ff]{3,}/;
+            let count = 0;
+            document.querySelectorAll(
+                '.bubble-content .message, .bubble-content .message-text'
+            ).forEach(el => {
+                if (brailleRe.test(el.textContent || '')) {
+                    el.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+                    count++;
+                }
+            });
+            if (!count) {
+                document.querySelectorAll('.bubble .inner').forEach(el => {
+                    if (brailleRe.test(el.textContent || '')) {
+                        el.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+                        count++;
+                    }
+                });
+            }
+            return count;
+        }""")
+        if revealed:
+            log(f"dispatched click on {revealed} bubble(s) with braille spoilers")
+            time.sleep(0.6)
+    except Exception:
+        pass
+
+
 def _scrape_portal_code_from_telegram_page(tg_page, settings: Settings, log: LogFn) -> str | None:
+    _click_to_reveal_spoilers(tg_page, log)
     try:
         blob = tg_page.inner_text("body", timeout=15000)
     except Exception:
@@ -393,6 +443,7 @@ def run_mytelegram_portal(
     _open_telegram_service_chat(tg, settings, log)
     log("waiting for chat to load")
     time.sleep(1.5)
+    _click_to_reveal_spoilers(tg, log)
 
     log("polling for portal confirmation code")
     code = _poll_portal_code(tg, settings, log)
