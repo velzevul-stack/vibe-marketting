@@ -94,7 +94,13 @@ def _poll_portal_code(
 
 
 def _fill_my_phone(portal_page, phone: str, settings: Settings, log: LogFn) -> None:
-    for sel in ('input[name="phone"]', 'input[type="tel"]', "input#phone-number"):
+    for sel in (
+        "#my_login_phone",
+        'input#my_login_phone',
+        'input[name="phone"]',
+        'input[type="tel"]',
+        "input#phone-number",
+    ):
         loc = portal_page.locator(sel).first
         try:
             if loc.is_visible(timeout=5000):
@@ -117,7 +123,14 @@ def _portal_submit_phone(portal_page, settings: Settings, log: LogFn) -> None:
         except Exception:
             continue
     try:
-        portal_page.locator('form button[type="submit"]').first.click(timeout=15000)
+        portal_page.locator("form#my_send_form button[type='submit']").first.click(
+            timeout=15000
+        )
+        D.delay_after_submit(settings, log)
+    except Exception:
+        pass
+    try:
+        portal_page.locator("#my_send_form .btn-primary").first.click(timeout=15000)
         D.delay_after_submit(settings, log)
     except Exception as e:
         raise RuntimeError(f"Не удалось отправить телефон на my.telegram.org: {e}") from e
@@ -130,6 +143,9 @@ def _fill_portal_confirmation_code(
     if not code:
         raise ValueError("Пустой код подтверждения my.telegram.org")
     for sel in (
+        "#my_password",
+        'input#my_password[name="password"]',
+        'form#my_login_form input[name="password"]',
         'input[name="password"]',
         'input[name="random_hash"]',
         'input[type="text"]',
@@ -156,7 +172,13 @@ def _portal_sign_in(portal_page, settings: Settings, log: LogFn) -> None:
                 return
         except Exception:
             continue
-    raise RuntimeError("Кнопка Sign In на my.telegram.org не найдена")
+    try:
+        portal_page.locator("form#my_login_form button[type='submit']").first.click(
+            timeout=20000
+        )
+        D.delay_after_submit(settings, log)
+    except Exception as e:
+        raise RuntimeError(f"Кнопка Sign In на my.telegram.org не найдена: {e}") from e
 
 
 def _goto_api_tools(portal_page, settings: Settings, log: LogFn) -> None:
@@ -246,7 +268,11 @@ def _try_create_application(
             portal_page.get_by_label(re.compile("Android|Platform", re.I)).first.click(
                 timeout=5000
             )
-        create = portal_page.get_by_role("button", name=re.compile(r"Create", re.I))
+        create = portal_page.get_by_role(
+            "button", name=re.compile(r"Create\s+application|Create", re.I)
+        )
+        if create.count() == 0:
+            create = portal_page.locator("#app_save_btn")
         if create.count() == 0:
             create = portal_page.locator('button[type="submit"]')
         create.first.click(timeout=20000)

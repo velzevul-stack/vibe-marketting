@@ -129,6 +129,7 @@ def _fill_phone_field(page: Page, phone: str, settings: Settings, log: LogFn) ->
 
 
 def _click_next_or_submit(page: Page, settings: Settings, log: LogFn) -> None:
+    """Кнопка Next на шаге номера — только внутри .page-sign (не весь документ)."""
     labels = (
         r"^Next$",
         r"^NEXT$",
@@ -137,20 +138,70 @@ def _click_next_or_submit(page: Page, settings: Settings, log: LogFn) -> None:
         r"^Continue$",
         r"^Продолжить$",
     )
+    sign = page.locator(_SIGN_TAB)
     for lab in labels:
         try:
-            btn = page.get_by_role("button", name=re.compile(lab, re.I))
-            if btn.count() > 0 and btn.first.is_visible(timeout=2000):
+            btn = sign.get_by_role("button", name=re.compile(lab, re.I))
+            if btn.count() > 0 and btn.first.is_visible(timeout=2500):
                 btn.first.click(timeout=10000)
                 D.delay_after_submit(settings, log)
                 return
         except Exception:
             continue
     try:
-        page.locator('button[type="submit"]').first.click(timeout=8000)
+        primary = sign.locator(
+            "button.btn-color-primary, button.btn-primary.btn-color-primary"
+        ).first
+        if primary.is_visible(timeout=3000):
+            primary.click(timeout=10000)
+            D.delay_after_submit(settings, log)
+            return
+    except Exception:
+        pass
+    try:
+        sign.locator('button[type="submit"]').first.click(timeout=8000)
         D.delay_after_submit(settings, log)
     except Exception as e:
         raise RuntimeError(f"Не найдена кнопка «Далее» / Next: {e}") from e
+
+
+def _maybe_submit_after_login_code(
+    page: Page, settings: Settings, log: LogFn
+) -> None:
+    """
+    После ввода SMS-кода на /k/ часто нет кнопки — отправка при заполнении поля.
+    Кликаем Next/Далее только если кнопка видна в зоне авторизации.
+    """
+    roots = (
+        page.locator(f"{_AUTH_TAB}.active"),
+        page.locator(_AUTH_TAB),
+        page.locator(".auth-pages .tabs-tab.page-authCode"),
+    )
+    labels = (
+        r"^Next$",
+        r"Next",
+        r"^Далее$",
+        r"Далее",
+        r"Continue",
+        r"Продолжить",
+        r"Submit",
+    )
+    for root in roots:
+        try:
+            if root.count() == 0:
+                continue
+            r = root.first
+            for lab in labels:
+                try:
+                    btn = r.get_by_role("button", name=re.compile(lab, re.I))
+                    if btn.count() > 0 and btn.first.is_visible(timeout=600):
+                        btn.first.click(timeout=8000)
+                        D.delay_after_submit(settings, log)
+                        return
+                except Exception:
+                    continue
+        except Exception:
+            continue
 
 
 def _auth_root(page: Page) -> Locator:
@@ -158,8 +209,9 @@ def _auth_root(page: Page) -> Locator:
 
 
 def _fill_multi_otp_boxes(boxes: Locator, code: str, settings: Settings, log: LogFn) -> bool:
+    """Несколько отдельных input (не один input с визуальными «цифрами»)."""
     n = boxes.count()
-    if n < len(code) or n < 4:
+    if n <= 1 or n < len(code) or n < 4:
         return False
     for i, ch in enumerate(code):
         try:
@@ -174,6 +226,21 @@ def _fill_multi_otp_boxes(boxes: Locator, code: str, settings: Settings, log: Lo
     return True
 
 
+def _fill_single_code_input(
+    loc: Locator, code: str, settings: Settings, log: LogFn
+) -> None:
+    loc.click(timeout=5000)
+    try:
+        loc.fill("", timeout=3000)
+    except Exception:
+        pass
+    try:
+        loc.fill(code, timeout=15000)
+    except Exception:
+        loc.press_sequentially(code, delay=50)
+    D.delay_after_type(settings, log)
+
+
 def _fill_login_code(page: Page, code: str, settings: Settings, log: LogFn) -> None:
     code = (code or "").strip()
     if not code:
@@ -183,50 +250,60 @@ def _fill_login_code(page: Page, code: str, settings: Settings, log: LogFn) -> N
     # После Next DOM переключается на page-authCode; поля часто появляются с задержкой
     D.delay_after_navigate(settings, log)
 
-    deadline = time.time() + 28.0
+    deadline = time.time() + 32.0
     last_err = ""
 
     while time.time() < deadline:
         try:
-            # 1) Несколько одноциферных полей в .input-wrapper
-            multi = auth.locator(
-                ".input-wrapper input:not([type='hidden']):not([type='checkbox']):not([type='radio'])"
-            )
-            mc = multi.count()
-            if mc >= max(4, len(code)):
-                if _fill_multi_otp_boxes(multi, code, settings, log):
-                    _click_next_or_submit(page, settings, log)
-                    return
+            wrap = auth.locator(".input-wrapper")
 
-            # 2) contenteditable (как номер телефона, но на вкладке кода)
-            ce = auth.locator('div.input-field-input[contenteditable="true"]').first
-            if ce.is_visible(timeout=700):
-                ce.click(timeout=4000)
-                ce.fill(code, timeout=15000)
-                D.delay_after_type(settings, log)
-                _click_next_or_submit(page, settings, log)
-                return
-
-            # 3) Один input (только внутри auth — не цепляем поле номера на page-sign)
+            # 1) Актуальный K: один input + autocomplete=one-time-code (см. Telegram Web code.html)
             for sel in (
                 'input[autocomplete="one-time-code"]',
-                'input[inputmode="numeric"]',
-                'input[type="tel"]',
-                'input[type="text"]',
+                '.input-wrapper input[autocomplete="one-time-code"]',
+                'input[inputmode="numeric"][required]',
+                ".input-wrapper input[inputmode='numeric']",
             ):
                 loc = auth.locator(sel).first
                 try:
-                    if loc.is_visible(timeout=900):
-                        loc.click(timeout=4000)
-                        loc.fill(code, timeout=15000)
-                        D.delay_after_type(settings, log)
-                        _click_next_or_submit(page, settings, log)
+                    if loc.is_visible(timeout=1000):
+                        _fill_single_code_input(loc, code, settings, log)
+                        _maybe_submit_after_login_code(page, settings, log)
                         return
                 except Exception as e:
                     last_err = str(e)
                     continue
 
-            # 4) textbox по доступному имени (Code / Код …)
+            # 2) Несколько отдельных input в .input-wrapper (старый вариант)
+            multi = wrap.locator(
+                "input:not([type='hidden']):not([type='checkbox']):not([type='radio'])"
+            )
+            mc = multi.count()
+            if mc >= max(4, len(code)) and mc > 1:
+                if _fill_multi_otp_boxes(multi, code, settings, log):
+                    _maybe_submit_after_login_code(page, settings, log)
+                    return
+
+            # 3) contenteditable на шаге кода
+            ce = auth.locator('div.input-field-input[contenteditable="true"]').first
+            if ce.is_visible(timeout=700):
+                _fill_single_code_input(ce, code, settings, log)
+                _maybe_submit_after_login_code(page, settings, log)
+                return
+
+            # 4) Прочие input только внутри auth
+            for sel in ('input[type="tel"]', 'input[type="text"]'):
+                loc = auth.locator(sel).first
+                try:
+                    if loc.is_visible(timeout=700):
+                        _fill_single_code_input(loc, code, settings, log)
+                        _maybe_submit_after_login_code(page, settings, log)
+                        return
+                except Exception as e:
+                    last_err = str(e)
+                    continue
+
+            # 5) textbox по имени
             try:
                 tb = auth.get_by_role(
                     "textbox",
@@ -235,29 +312,25 @@ def _fill_login_code(page: Page, code: str, settings: Settings, log: LogFn) -> N
                     ),
                 ).first
                 if tb.is_visible(timeout=800):
-                    tb.click(timeout=4000)
-                    tb.fill(code, timeout=15000)
-                    D.delay_after_type(settings, log)
-                    _click_next_or_submit(page, settings, log)
+                    _fill_single_code_input(tb, code, settings, log)
+                    _maybe_submit_after_login_code(page, settings, log)
                     return
             except Exception as e:
                 last_err = str(e)
 
-            # 5) Любой видимый input внутри auth (кроме hidden)
-            any_inp = auth.locator("input").filter(has_not=page.locator("[type='hidden']"))
-            ac = any_inp.count()
-            for i in range(min(ac, 12)):
-                loc = any_inp.nth(i)
+            # 6) Любой видимый input в auth (кроме служебных типов)
+            ac = auth.locator("input").count()
+            for i in range(min(ac, 16)):
+                loc = auth.locator("input").nth(i)
                 try:
-                    if loc.is_visible(timeout=400):
-                        t = (loc.get_attribute("type") or "").lower()
-                        if t in ("checkbox", "radio", "submit", "button"):
-                            continue
-                        loc.click(timeout=3000)
-                        loc.fill(code, timeout=15000)
-                        D.delay_after_type(settings, log)
-                        _click_next_or_submit(page, settings, log)
-                        return
+                    if not loc.is_visible(timeout=400):
+                        continue
+                    t = (loc.get_attribute("type") or "").lower()
+                    if t in ("hidden", "checkbox", "radio", "submit", "button"):
+                        continue
+                    _fill_single_code_input(loc, code, settings, log)
+                    _maybe_submit_after_login_code(page, settings, log)
+                    return
                 except Exception as e:
                     last_err = str(e)
         except Exception as e:
