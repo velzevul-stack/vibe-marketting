@@ -27,6 +27,7 @@ from src.config import (
 from src.mytelegram_portal.browser_profiles import playwright_context_options_for_mytg
 from src.mytelegram_portal.portal_flow import run_mytelegram_portal
 from src.mytelegram_portal.pw_util import launch_browser, playwright_proxy_from_url
+from src.mytelegram_portal.web_telegram_login import _diag_screenshot, _page_diagnostic
 from src.mytelegram_portal.state import (
     AccountJob,
     PortalState,
@@ -288,6 +289,11 @@ def run_mytg_menu_flow(
                     except Exception as e:
                         job.status = "failed"
                         job.last_error = str(e)
+                        try:
+                            _page_diagnostic(page, lg, "phase1_error")
+                            _diag_screenshot(page, lg, f"phase1_error_{job.session_name}")
+                        except Exception:
+                            pass
                         console.print(f"[red][mytg][/] {job.session_name}: {e}[/]")
                     finally:
                         context.close()

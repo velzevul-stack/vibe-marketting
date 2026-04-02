@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import time
+from pathlib import Path
 from typing import Callable
 
 from playwright.sync_api import Locator, Page
@@ -16,6 +17,56 @@ LogFn = Callable[[str], None]
 
 _SIGN_TAB = ".tabs-tab.page-sign"
 _AUTH_TAB = ".tabs-tab.page-authCode"
+
+_DIAG_DIR = Path("output/mytg_diag")
+
+
+def _page_diagnostic(page: Page, log: LogFn, label: str = "") -> str:
+    """Log current page URL, visible text hints, and auth-state markers."""
+    try:
+        url = page.url
+    except Exception:
+        url = "?"
+    parts = [f"[diag:{label}] url={url}"]
+    checks = {
+        "2fa_password": 'input[type="password"]',
+        "auth_code_tab": ".tabs-tab.page-authCode.active",
+        "sign_tab": ".tabs-tab.page-sign.active",
+        "main_input": "div.input-message-input",
+        "chatlist": ".chatlist-chat",
+        "error_alert": ".error, .popup-peer .popup-title",
+    }
+    for name, sel in checks.items():
+        try:
+            loc = page.locator(sel)
+            cnt = loc.count()
+            if cnt > 0 and loc.first.is_visible(timeout=300):
+                parts.append(f"{name}=visible({cnt})")
+            elif cnt > 0:
+                parts.append(f"{name}=hidden({cnt})")
+        except Exception:
+            pass
+    try:
+        body = page.locator("body").first.inner_text(timeout=3000)
+        snippet = " ".join(body.split())[:300]
+        parts.append(f"text={snippet!r}")
+    except Exception:
+        pass
+    msg = " | ".join(parts)
+    log(msg)
+    return msg
+
+
+def _diag_screenshot(page: Page, log: LogFn, tag: str = "fail") -> None:
+    """Save a PNG screenshot to output/mytg_diag/ for headless debugging."""
+    try:
+        _DIAG_DIR.mkdir(parents=True, exist_ok=True)
+        ts = int(time.time())
+        path = _DIAG_DIR / f"{tag}_{ts}.png"
+        page.screenshot(path=str(path), full_page=True, timeout=15000)
+        log(f"screenshot saved: {path}")
+    except Exception as e:
+        log(f"screenshot failed: {e}")
 
 
 def _sign_tab(page: Page) -> Locator:
@@ -423,17 +474,24 @@ def _maybe_cloud_password(
     try:
         pwd_input = page.locator('input[type="password"]').first
         if not pwd_input.is_visible(timeout=4000):
+            log("2FA password field not detected — skipping")
             return
     except Exception:
+        log("2FA password field not detected — skipping")
         return
+    log("2FA password field DETECTED — attempting auto-fill")
+    _page_diagnostic(page, log, "2fa_detected")
     pwd = (get_password() or "").strip()
     if not pwd:
+        _diag_screenshot(page, log, "2fa_no_password")
         raise RuntimeError("Требуется пароль 2FA")
     try:
         pwd_input.fill(pwd, timeout=10000)
         D.delay_after_type(settings, log)
         _click_next_or_submit(page, settings, log)
+        log("2FA password submitted")
     except Exception as e:
+        _diag_screenshot(page, log, "2fa_submit_fail")
         raise RuntimeError(f"Не удалось отправить пароль 2FA: {e}") from e
 
 
@@ -446,7 +504,10 @@ def _wait_main_loaded(page: Page, log: LogFn, timeout_ms: int = 180000) -> None:
     )
     end = time.time() + timeout_ms / 1000.0
     last_err: str | None = None
+    iteration = 0
+    log(f"waiting for main Telegram Web UI (timeout {timeout_ms / 1000:.0f}s) ...")
     while time.time() < end:
+        iteration += 1
         for sel in markers:
             try:
                 loc = page.locator(sel).first
@@ -455,7 +516,15 @@ def _wait_main_loaded(page: Page, log: LogFn, timeout_ms: int = 180000) -> None:
                     return
             except Exception as e:
                 last_err = str(e)
+        if iteration == 1 or iteration % 10 == 0:
+            remaining = max(0, end - time.time())
+            log(f"main UI not yet visible (iter={iteration}, {remaining:.0f}s left)")
+            _page_diagnostic(page, log, f"wait_main_iter{iteration}")
+            if iteration == 1:
+                _diag_screenshot(page, log, f"wait_main_iter{iteration}")
         time.sleep(2.0)
+    _page_diagnostic(page, log, "wait_main_timeout")
+    _diag_screenshot(page, log, "wait_main_timeout")
     raise RuntimeError(
         "Таймаут ожидания главного экрана Telegram Web "
         f"(последняя ошибка: {last_err})"
@@ -488,9 +557,14 @@ def run_telegram_web_login(
     digits = re.sub(r"\D", "", raw_code) if raw_code else ""
     code_to_use = digits if digits else (raw_code or "").strip()
     _fill_login_code(page, code_to_use, settings, log)
+    log("login code submitted, checking page state ...")
+    _page_diagnostic(page, log, "after_code")
     _maybe_cloud_password(page, settings, log, get_2fa_password)
     try:
         _wait_main_loaded(page, log)
     except RuntimeError:
+        log("first wait_main_loaded failed — retrying after 2FA check")
+        _page_diagnostic(page, log, "retry_2fa")
+        _diag_screenshot(page, log, "retry_2fa")
         _maybe_cloud_password(page, settings, log, get_2fa_password)
         _wait_main_loaded(page, log)
