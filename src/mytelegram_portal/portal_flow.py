@@ -94,9 +94,35 @@ def _poll_portal_code(
 
 
 def _fill_my_phone(portal_page, phone: str, settings: Settings, log: LogFn) -> None:
+    # Разметка my.telegram.org: form#my_send_form, label[for=my_login_phone], input#my_login_phone
+    try:
+        loc = portal_page.get_by_label(
+            re.compile(
+                r"Your Phone Number|phone number|номер телефона|телефон",
+                re.I,
+            )
+        ).first
+        if loc.is_visible(timeout=4000):
+            loc.fill(phone, timeout=15000)
+            D.delay_after_type(settings, log)
+            return
+    except Exception:
+        pass
+    try:
+        loc = portal_page.get_by_placeholder(
+            re.compile(r"\+?\d", re.I)
+        ).first
+        if loc.is_visible(timeout=3000):
+            loc.fill(phone, timeout=15000)
+            D.delay_after_type(settings, log)
+            return
+    except Exception:
+        pass
     for sel in (
+        "#my_send_form #my_login_phone",
         "#my_login_phone",
         'input#my_login_phone',
+        'form#my_send_form input[type="text"]',
         'input[name="phone"]',
         'input[type="tel"]',
         "input#phone-number",
@@ -142,7 +168,18 @@ def _fill_portal_confirmation_code(
     code = (code or "").strip()
     if not code:
         raise ValueError("Пустой код подтверждения my.telegram.org")
+    try:
+        loc = portal_page.get_by_label(
+            re.compile(r"Confirmation code|код подтверждения|confirmation", re.I)
+        ).first
+        if loc.is_visible(timeout=5000):
+            loc.fill(code, timeout=15000)
+            D.delay_after_type(settings, log)
+            return
+    except Exception:
+        pass
     for sel in (
+        "#my_login_form #my_password",
         "#my_password",
         'input#my_password[name="password"]',
         'form#my_login_form input[name="password"]',

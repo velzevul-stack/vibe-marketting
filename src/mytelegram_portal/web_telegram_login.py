@@ -18,6 +18,28 @@ _SIGN_TAB = ".tabs-tab.page-sign"
 _AUTH_TAB = ".tabs-tab.page-authCode"
 
 
+def _sign_tab(page: Page) -> Locator:
+    """Предпочитаем активную вкладку входа (после «Log in by phone number»)."""
+    active = page.locator(".tabs-tab.page-sign.active")
+    try:
+        if active.count() > 0:
+            return active.first
+    except Exception:
+        pass
+    return page.locator(_SIGN_TAB)
+
+
+def _auth_tab(page: Page) -> Locator:
+    """Вкладка кода: приоритет .active (как в разметке K)."""
+    active = page.locator(".tabs-tab.page-authCode.active")
+    try:
+        if active.count() > 0:
+            return active.first
+    except Exception:
+        pass
+    return page.locator(_AUTH_TAB)
+
+
 def _try_click_phone_login(page: Page, settings: Settings, log: LogFn) -> None:
     """С экрана QR — кнопка «Log in by phone number» (role=button), не ссылка."""
     patterns = (
@@ -52,10 +74,19 @@ def _ensure_phone_form_visible(page: Page, settings: Settings, log: LogFn) -> No
 
 
 def _is_phone_field_visible(page: Page, *, quick_ms: int) -> bool:
+    sign = _sign_tab(page)
     locs = (
-        page.locator(f"{_SIGN_TAB} div.input-field-phone div.input-field-input[contenteditable='true']"),
+        sign.locator(
+            "div.input-field.input-field-phone div.input-field-input[contenteditable='true']"
+        ),
+        sign.locator("div.input-field-phone div.input-field-input[contenteditable='true']"),
+        page.locator(
+            f"{_SIGN_TAB} div.input-field.input-field-phone div.input-field-input[contenteditable='true']"
+        ),
         page.locator("div.input-field-phone div.input-field-input[contenteditable='true']"),
-        page.locator(f"{_SIGN_TAB} div.input-field:not(.input-select) div.input-field-input[contenteditable='true']"),
+        sign.locator(
+            "div.input-field:not(.input-select) div.input-field-input[contenteditable='true']"
+        ),
     )
     for loc in locs:
         try:
@@ -67,11 +98,12 @@ def _is_phone_field_visible(page: Page, *, quick_ms: int) -> bool:
 
 
 def _fill_phone_field(page: Page, phone: str, settings: Settings, log: LogFn) -> bool:
-    # Актуальная разметка K: div.input-field.input-field-phone + contenteditable
-    sign = page.locator(_SIGN_TAB)
+    # Разметка web.telegram.org/k (2025): .page-sign .input-field.input-field-phone + contenteditable
+    sign = _sign_tab(page)
     ce_selectors = (
-        "div.input-field-phone div.input-field-input[contenteditable='true']",
         "div.input-field.input-field-phone div.input-field-input[contenteditable='true']",
+        "div.input-field.input-field-phone div.input-field-input[contenteditable='true'][inputmode='decimal']",
+        "div.input-field-phone div.input-field-input[contenteditable='true']",
         "div.input-field:not(.input-select) div.input-field-input[contenteditable='true']",
         'div.input-field-input[contenteditable="true"][inputmode="decimal"]',
     )
@@ -138,7 +170,7 @@ def _click_next_or_submit(page: Page, settings: Settings, log: LogFn) -> None:
         r"^Continue$",
         r"^Продолжить$",
     )
-    sign = page.locator(_SIGN_TAB)
+    sign = _sign_tab(page)
     for lab in labels:
         try:
             btn = sign.get_by_role("button", name=re.compile(lab, re.I))
@@ -173,8 +205,7 @@ def _maybe_submit_after_login_code(
     Кликаем Next/Далее только если кнопка видна в зоне авторизации.
     """
     roots = (
-        page.locator(f"{_AUTH_TAB}.active"),
-        page.locator(_AUTH_TAB),
+        _auth_tab(page),
         page.locator(".auth-pages .tabs-tab.page-authCode"),
     )
     labels = (
@@ -205,7 +236,7 @@ def _maybe_submit_after_login_code(
 
 
 def _auth_root(page: Page) -> Locator:
-    return page.locator(_AUTH_TAB)
+    return _auth_tab(page)
 
 
 def _fill_multi_otp_boxes(boxes: Locator, code: str, settings: Settings, log: LogFn) -> bool:
@@ -227,18 +258,47 @@ def _fill_multi_otp_boxes(boxes: Locator, code: str, settings: Settings, log: Lo
 
 
 def _fill_single_code_input(
-    loc: Locator, code: str, settings: Settings, log: LogFn
+    loc: Locator,
+    code: str,
+    settings: Settings,
+    log: LogFn,
+    *,
+    force: bool = False,
 ) -> None:
-    loc.click(timeout=5000)
     try:
-        loc.fill("", timeout=3000)
+        loc.click(timeout=5000, force=force)
     except Exception:
-        pass
+        loc.click(timeout=5000)
     try:
-        loc.fill(code, timeout=15000)
+        loc.fill("", timeout=3000, force=force)
     except Exception:
-        loc.press_sequentially(code, delay=50)
+        try:
+            loc.fill("", timeout=3000)
+        except Exception:
+            pass
+    try:
+        loc.fill(code, timeout=15000, force=force)
+    except Exception:
+        try:
+            loc.fill(code, timeout=15000)
+        except Exception:
+            loc.press_sequentially(code, delay=50)
     D.delay_after_type(settings, log)
+
+
+def _try_fill_telegram_web_otp_input(
+    loc: Locator, code: str, settings: Settings, log: LogFn
+) -> bool:
+    """
+    Поле кода в K — один input (autocomplete=one-time-code), часто невидим для
+    Playwright (стили), но в DOM есть. Ждём attached и fill(..., force=True).
+    """
+    try:
+        loc.wait_for(state="attached", timeout=12000)
+    except Exception:
+        return False
+    _fill_single_code_input(loc, code, settings, log, force=True)
+    return True
 
 
 def _fill_login_code(page: Page, code: str, settings: Settings, log: LogFn) -> None:
@@ -257,17 +317,26 @@ def _fill_login_code(page: Page, code: str, settings: Settings, log: LogFn) -> N
         try:
             wrap = auth.locator(".input-wrapper")
 
-            # 1) Актуальный K: один input + autocomplete=one-time-code (см. Telegram Web code.html)
+            # 1) Актуальный K: один input autocomplete=one-time-code (emailSetup / pageAuthCode)
             for sel in (
                 'input[autocomplete="one-time-code"]',
-                '.input-wrapper input[autocomplete="one-time-code"]',
+                ".input-wrapper input[autocomplete='one-time-code']",
                 'input[inputmode="numeric"][required]',
-                ".input-wrapper input[inputmode='numeric']",
+                ".input-wrapper input[inputmode='numeric'][required]",
             ):
-                loc = auth.locator(sel).first
+                group = auth.locator(sel)
                 try:
-                    if loc.is_visible(timeout=1000):
+                    if group.count() == 0:
+                        continue
+                except Exception:
+                    continue
+                loc = group.first
+                try:
+                    if loc.is_visible(timeout=600):
                         _fill_single_code_input(loc, code, settings, log)
+                        _maybe_submit_after_login_code(page, settings, log)
+                        return
+                    if _try_fill_telegram_web_otp_input(loc, code, settings, log):
                         _maybe_submit_after_login_code(page, settings, log)
                         return
                 except Exception as e:
